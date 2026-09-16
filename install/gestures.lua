@@ -1,31 +1,34 @@
--- Optional touchpad gestures, for ~/.config/hypr/input.lua.
+-- Touchpad gestures, for ~/.config/hypr/input.lua.
 --
--- Three and four fingers both: macOS uses three, and three here coexists with
--- the three-finger *horizontal* workspace swipe, because `direction` is part of
--- the gesture spec and the axis distinguishes them.
+-- The overview follows the fingers: a vertical swipe streams its motion to the
+-- plugin, which moves the windows as you swipe and, on release, settles open or
+-- closed depending on how far and how fast you went. Swipe up opens, swipe down
+-- closes, and you can change your mind mid-swipe.
 --
--- Two fingers is not possible, and this is not a Hyprland limitation: libinput
--- only emits SWIPE events for three or more fingers. Two is always scroll or
--- pinch, and there is no horizontal-scroll bind to hang a workspace switch off.
+-- How: Hyprland (0.56+) accepts a table of start/update/end callbacks as a
+-- gesture action. Each callback emits a custom event on Hyprland's event socket
+-- (`hl.dsp.event`), which the plugin already listens on. Spawning
+-- `omarchy-shell` per update would be far too slow to track a finger.
 --
--- Testing note: there is no unset/ungesture in the Lua API (only hl.unbind for
--- keys), so a `hyprctl reload` cannot remove a gesture registered earlier in
--- the session. Editing this file and reloading is NOT a valid way to test a
--- gesture change -- log out and back in. Relatedly, if a gesture stops
--- responding entirely, that is a known upstream Hyprland bug rather than a
--- conflict with these; restarting the compositor clears it.
+-- libinput only emits swipes for three or more fingers. Pick the count that is
+-- not already taken by a horizontal workspace swipe -- `vertical` and
+-- `horizontal` on the same count coexist, the initial direction decides.
 --
--- `hide` rather than a bare toggle on the downward swipe, for the same reason
--- as CTRL+DOWN in bindings.lua.
+-- Testing note: there is no ungesture in the Lua API, so `hyprctl reload`
+-- cannot remove a gesture registered earlier in the session. After editing,
+-- log out and back in.
 
-local mc_toggle = "omarchy-shell shell toggle io.github.andyweiboan.missioncontrol '{}'"
-local mc_hide   = "omarchy-shell shell hide io.github.andyweiboan.missioncontrol"
-
-for _, fingers in ipairs({ 3, 4 }) do
-  hl.gesture({ fingers = fingers, direction = "up", action = function()
-    hl.dispatch(hl.dsp.exec_cmd(mc_toggle))
-  end })
-  hl.gesture({ fingers = fingers, direction = "down", action = function()
-    hl.dispatch(hl.dsp.exec_cmd(mc_hide))
-  end })
+local function mc_event(phase, value, time_ms)
+  hl.dispatch(hl.dsp.event(string.format("mission-control-gesture:%s:%s:%d",
+    phase, value, math.floor(time_ms or 0))))
 end
+
+hl.gesture({
+  fingers = 4,
+  direction = "vertical",
+  action = {
+    start = function(e) mc_event("start", string.format("%.3f", e.delta and e.delta.y or 0), e.time_ms) end,
+    update = function(e) mc_event("update", string.format("%.3f", e.delta and e.delta.y or 0), e.time_ms) end,
+    ["end"] = function(e) mc_event("end", e.cancelled and 1 or 0, e.time_ms) end,
+  },
+})

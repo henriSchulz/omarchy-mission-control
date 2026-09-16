@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.andyweiboan.missioncontrol",
+  "id": "henri.missioncontrol",
   "name": "Mission Control",
-  "version": "1.0.4",
-  "author": "Andy Wei",
-  "description": "macOS-style workspace overview: a strip of live desktop thumbnails across the top, the current desktop's windows shrunk out beneath it",
+  "version": "1.1.0",
+  "author": "Henri Schulz (based on Andy Wei's Mission Control)",
+  "description": "macOS-style workspace overview with a finger-following touchpad swipe: live desktop thumbnails across the top, the current desktop's windows shrunk out beneath",
   "kinds": [
     "overlay"
   ],
@@ -13,5 +13,5 @@
     "overlay": "MissionControl.qml"
   },
   "license": "MIT",
-  "homepage": "https://github.com/AndyWeiBoan/omarchy-mission-control"
+  "homepage": "https://github.com/henriSchulz/omarchy-mission-control"
 }

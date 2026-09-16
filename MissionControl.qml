@@ -83,7 +83,7 @@ Item {
   function dismiss() {
     root.setShown(false)
     if (root.shell && typeof root.shell.hide === "function")
-      root.shell.hide((root.manifest && root.manifest.id) || "io.github.andyweiboan.missioncontrol")
+      root.shell.hide((root.manifest && root.manifest.id) || "henri.missioncontrol")
   }
 
   // --- appearance ---------------------------------------------------------
@@ -199,13 +199,185 @@ Item {
   // real desktop and bar. Two transitions in one place reads as the region
   // being redrawn, which is exactly what it was. Now it leaves once, dissolved
   // together with everything else by the closing crossfade.
-  property bool stripDeployed: false
-  onExpandedChanged: if (root.expanded) root.stripDeployed = true
+  //
+  // The strip itself now rides on `progress`, so it follows the fingers during a
+  // swipe. `stripHold` pins it in place for a close that starts from the settled
+  // overview (keyboard, click, Escape) -- the case the flicker note is about. A
+  // swipe down deliberately does not hold it: the strip leaving with the fingers
+  // is the point there.
+  property bool stripHold: false
+  readonly property real stripProgress: root.stripHold ? 1 : Math.max(0, Math.min(1, root.progress))
   // Reset for the next open, once nothing is on screen to see it move.
-  onShownChanged: if (!root.shown) root.stripDeployed = false
+  onShownChanged: {
+    if (root.shown)
+      return;
+    root.stripHold = false;
+    progressAnim.stop();
+    root.progress = 0;
+  }
 
-  readonly property int shrinkDuration: 260
-  readonly property int fadeDuration: 130
+  readonly property int shrinkDuration: 380
+  readonly property int fadeDuration: 150
+
+  // One animated number drives the whole shrink, 0 = real desktop, 1 = overview.
+  // Every window, the strip and the labels derive from it, so they cannot drift
+  // apart the way four independent Behaviors per window did. OutQuart front-loads
+  // the movement, which reads as responsive without the hard stop of OutCubic.
+  //
+  // Not a binding: during a touchpad swipe it is set directly from the fingers,
+  // and otherwise animated from wherever it currently is -- so a swipe can grab
+  // an animation mid-flight, and a release continues from the finger position
+  // instead of restarting from 0 or 1.
+  property real progress: 0
+  NumberAnimation {
+    id: progressAnim
+    target: root
+    property: "progress"
+  }
+  onExpandedChanged: if (!root.tracking) root.animateProgress(root.expanded ? 1 : 0)
+
+  // Animate to `to` from the current value. Duration scales with the distance
+  // left, so finishing a half-done swipe does not take as long as a full open.
+  // After a swipe the release speed is matched: OutCubic starts at three times
+  // its average speed, so 3 * distance / velocity continues the finger motion
+  // without a visible kink.
+  function animateProgress(to) {
+    progressAnim.stop();
+    const dist = Math.abs(to - root.progress);
+    if (dist < 0.001) {
+      root.progress = to;
+      return;
+    }
+    let dur = Math.round(root.shrinkDuration * Math.sqrt(Math.min(1, dist)));
+    let easing = Easing.OutQuart;
+    if (root.releasing) {
+      easing = Easing.OutCubic;
+      const speed = Math.abs(root.trackVelocity);
+      if (speed > 0.0005)
+        dur = Math.min(dur, Math.round(3 * dist / speed));
+    }
+    progressAnim.from = root.progress;
+    progressAnim.to = to;
+    progressAnim.duration = Math.max(140, Math.min(root.shrinkDuration, dur));
+    progressAnim.easing.type = easing;
+    progressAnim.start();
+  }
+
+  // --- touchpad swipe -------------------------------------------------------
+  // Hyprland's gesture callbacks (input.lua) forward the raw finger motion as
+  // custom socket events: "mission-control-gesture:<phase>:<value>:<time_ms>".
+  // Spawning a process per update would be far too slow for that; the event
+  // socket is already open and costs nothing.
+  //
+  // Only numbers are parsed out of it and nothing is dispatched from it, so a
+  // client forging such an event could at most wiggle the overview.
+  property bool tracking: false
+  property bool releasing: false
+  property real trackStart: 0
+  property real trackTravel: 0
+  property real trackVelocity: 0 // progress per ms, positive = opening
+  property real trackLastTime: 0
+  // Finger travel, in touchpad units, for a full open.
+  readonly property real gestureDistance: 320
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (event.name !== "custom")
+        return;
+      const data = String(event.data || "");
+      if (!data.startsWith("mission-control-gesture:") || data.length > 96)
+        return;
+      const parts = data.split(":");
+      const value = Number(parts[2]);
+      const time = Number(parts[3]);
+      if (!isFinite(value) || !isFinite(time))
+        return;
+      root.handleGesture(parts[1], value, time);
+    }
+  }
+
+  function handleGesture(phase, value, time) {
+    if (phase === "start") {
+      progressAnim.stop();
+      collapseThenHide.stop();
+      fadeOutSoon.stop();
+      expandFallback.stop();
+      root.tracking = true;
+      root.stripHold = false;
+      root.trackStart = Math.max(0, Math.min(1, root.progress));
+      root.trackTravel = 0;
+      root.trackVelocity = 0;
+      root.trackLastTime = time;
+      root.contentVisible = true;
+      if (!root.shown) {
+        root.refreshWallpaper();
+        Hyprland.refreshMonitors();
+        Hyprland.refreshWorkspaces();
+        Hyprland.refreshToplevels();
+        root.shown = true;
+      }
+      // Hyprland only starts a gesture once the fingers have moved, and that
+      // first movement arrives with the start rather than as an update.
+      if (value !== 0)
+        root.handleGesture("update", value, time);
+    } else if (phase === "update" && root.tracking) {
+      // Swiping up is negative y; up opens.
+      const step = -value / root.gestureDistance;
+      root.trackTravel += step;
+      const dt = time - root.trackLastTime;
+      if (dt > 0) {
+        const instant = step / dt;
+        root.trackVelocity = root.trackVelocity * 0.5 + instant * 0.5;
+        root.trackLastTime = time;
+      }
+      const raw = root.trackStart + root.trackTravel;
+      // Past fully open: resist, a little, like a rubber band.
+      root.progress = raw <= 0 ? 0
+          : raw <= 1 ? raw
+          : 1 + 0.06 * (1 - 1 / (1 + (raw - 1) * 3));
+    } else if (phase === "end" && root.tracking) {
+      root.tracking = false;
+      // Fingers held still before lifting: no fling.
+      if (time - root.trackLastTime > 80 || value === 1)
+        root.trackVelocity = 0;
+      let open = root.progress + root.trackVelocity * 120 > 0.5;
+      if (Math.abs(root.trackVelocity) > 0.0015)
+        open = root.trackVelocity > 0;
+      root.releasing = true;
+      if (open) {
+        // Through the shell, so its open-plugin bookkeeping matches.
+        if (root.shell && typeof root.shell.summon === "function")
+          root.shell.summon((root.manifest && root.manifest.id) || "henri.missioncontrol", "{}");
+        else
+          root.open("{}");
+      } else {
+        root.dismiss();
+      }
+      root.releasing = false;
+    }
+  }
+  // Windows have arrived. Expensive work (live capture of every other desktop)
+  // waits for this so it does not compete with the animation for frames.
+  readonly property bool settled: root.expanded && root.progress >= 1
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  // Repeater models built from JS arrays reset -- destroy and recreate every
+  // delegate, captures included -- whenever the array is reassigned, and these
+  // arrays are recomputed on every lastIpcObject update. The refresh on open
+  // lands mid-animation, so without this the windows were rebuilt while
+  // shrinking. Keep the old array unless the members actually changed.
+  function sameList(a, b) {
+    if (!a || !b || a.length !== b.length)
+      return false;
+    for (let i = 0; i < a.length; i++)
+      if (a[i] !== b[i])
+        return false;
+    return true;
+  }
 
   function setShown(next) {
     root.opened = next;
@@ -216,8 +388,12 @@ Item {
       collapseThenHide.stop();
       fadeOutSoon.stop();
       root.contentVisible = true;
+      root.stripHold = false;
       if (root.shown) {
         root.expanded = true;
+        // Explicitly: `expanded` may already be true (a swipe that went back
+        // to open), and then there is no change signal to start it.
+        root.animateProgress(1);
         return;
       }
     } else if (!root.shown) {
@@ -252,8 +428,16 @@ Item {
       // Reverse of the open: shrink back out to the real desktop, then drop the
       // surface once the windows are home. Dropping it first would cut the
       // animation off and read as a flicker.
+      if (!root.releasing && root.progress > 0.99)
+        root.stripHold = true;
       root.expanded = false;
+      root.animateProgress(0);
       expandFallback.stop();
+      // Timed off the animation actually running, which is shorter when the
+      // close starts part-way (a released swipe).
+      const dur = progressAnim.running ? progressAnim.duration : 0;
+      fadeOutSoon.interval = Math.round(dur * 0.55);
+      collapseThenHide.interval = Math.max(dur, Math.round(dur * 0.55) + root.fadeDuration);
       fadeOutSoon.restart();
       collapseThenHide.restart();
     }
@@ -335,14 +519,15 @@ Item {
   // over the tail of the movement rather than after it.
   Timer {
     id: fadeOutSoon
-    interval: Math.max(0, root.shrinkDuration - 60)
-    onTriggered: if (!root.opened) root.contentVisible = false
+    // Set on each close; OutQuart is ~95% home at 55% of the duration.
+    interval: Math.round(root.shrinkDuration * 0.55)
+    onTriggered: if (!root.opened && !root.tracking) root.contentVisible = false
   }
 
   Timer {
     id: collapseThenHide
-    interval: root.shrinkDuration - 60 + root.fadeDuration
-    onTriggered: if (!root.opened) root.shown = false
+    interval: Math.max(root.shrinkDuration, Math.round(root.shrinkDuration * 0.55) + root.fadeDuration)
+    onTriggered: if (!root.opened && !root.tracking) root.shown = false
   }
 
   Timer {
@@ -499,7 +684,9 @@ Item {
       // Workspaces 1-N exist at all times because looknfeel.lua pins them
       // persistent -- without that Hyprland would only create them on demand
       // and the strip would have holes that appear and vanish.
-      readonly property var desktops: {
+      property var desktops: []
+      onDesktopsLiveChanged: if (!root.sameList(panel.desktops, panel.desktopsLive)) panel.desktops = panel.desktopsLive
+      readonly property var desktopsLive: {
         const out = [];
         const all = Hyprland.workspaces.values || [];
         for (let i = 0; i < all.length; i++) {
@@ -514,6 +701,11 @@ Item {
         return out;
       }
 
+      Component.onCompleted: {
+        panel.desktops = panel.desktopsLive;
+        panel.windows = panel.windowsLive;
+      }
+
       readonly property var currentDesktop: {
         for (let i = 0; i < panel.desktops.length; i++)
           if (panel.desktops[i].focused)
@@ -524,7 +716,9 @@ Item {
       // Windows of the current desktop, most recently used first --
       // focusHistoryID counts up from the window you were last in, so ascending
       // order puts the one you are coming back to in the top-left.
-      readonly property var windows: {
+      property var windows: []
+      onWindowsLiveChanged: if (!root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
+      readonly property var windowsLive: {
         const out = [];
         if (!panel.currentDesktop)
           return out;
@@ -829,17 +1023,10 @@ Item {
           width: parent.width
           height: panel.stripH
           // Slides down from off-screen as the desktop shrinks to make room for
-          // it, which is where macOS puts the motion. Driven by stripDeployed,
-          // not by `expanded`, so it does not animate back out on close -- see
-          // the note on stripDeployed.
-          y: root.stripDeployed ? 0 : -panel.stripH
-          opacity: root.stripDeployed ? 1 : 0
-          Behavior on y {
-            NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic }
-          }
-          Behavior on opacity {
-            NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic }
-          }
+          // it, which is where macOS puts the motion. Driven by stripProgress,
+          // which holds it in place on a non-swipe close -- see stripHold.
+          y: root.lerp(-panel.stripH, 0, root.stripProgress)
+          opacity: root.stripProgress
           color: Qt.rgba(1, 1, 1, 0.07)
 
           Rectangle {
@@ -861,7 +1048,10 @@ Item {
                 width: panel.stripTileW
                 height: panel.stripTileH + panel.stripLabelBand
 
-                readonly property var deskWindows: {
+                property var deskWindows: []
+                onDeskWindowsLiveChanged: if (!root.sameList(deskCell.deskWindows, deskCell.deskWindowsLive)) deskCell.deskWindows = deskCell.deskWindowsLive
+                Component.onCompleted: deskCell.deskWindows = deskCell.deskWindowsLive
+                readonly property var deskWindowsLive: {
                   const out = [];
                   const tls = deskCell.modelData.toplevels ? (deskCell.modelData.toplevels.values || []) : [];
                   for (let i = 0; i < tls.length; i++) {
@@ -957,7 +1147,12 @@ Item {
                         // capture of one is measured and works. Do not
                         // reintroduce it without a window open on another
                         // workspace to test against.
-                        live: root.shown
+                        // ...and not until the shrink has finished: every
+                        // frame of another desktop is a render Hyprland does
+                        // just for us, and doing that for all desktops while
+                        // the windows are moving is what dropped frames. The
+                        // source above still takes one frame straight away.
+                        live: root.shown && root.settled
                         paintCursor: false
                       }
                     }
@@ -1069,69 +1264,88 @@ Item {
             readonly property real targetW: realW * panel.shrink
             readonly property real targetH: realH * panel.shrink
 
-            x: root.expanded ? targetX : realX
-            y: root.expanded ? targetY : realY
-            width: root.expanded ? targetW : realW
-            height: root.expanded ? targetH : realH
+            // Labels and the selection ring belong to the overview, so they
+            // sit at the target rect and fade in over the last stretch of the
+            // shrink instead of riding down at full size.
+            readonly property real labelOpacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
 
-            // One easing for all four, or the window visibly changes shape on
-            // the way down instead of just getting smaller.
-            Behavior on x { NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic } }
-            Behavior on y { NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic } }
-            Behavior on width { NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic } }
-            Behavior on height { NumberAnimation { duration: root.shrinkDuration; easing.type: Easing.OutCubic } }
-
+            // The window itself. Its size never changes -- it stays at the real
+            // size and is moved and scaled with a transform. Animating
+            // width/height (as before) re-laid-out the capture, ring, icon and
+            // title every frame; a transform is just a matrix on the GPU. Scale
+            // is uniform, so this is the same motion as before, only cheaper.
             Item {
-              id: shot
-              anchors.fill: parent
-
-              ScreencopyView {
-                anchors.fill: parent
-                // Null while hidden -- see the note in the Spaces strip.
-                captureSource: root.shown ? win.modelData.wayland : null
-                // Live while shown, and only while shown -- see the note in the
-                // Spaces strip. Hyprland renders a toplevel on demand for
-                // capture whether or not it is on a visible workspace, so
-                // "live" costs nothing extra beyond the frames themselves.
-                live: root.shown
-                paintCursor: false
+              id: body
+              x: root.lerp(win.realX, win.targetX, root.progress)
+              y: root.lerp(win.realY, win.targetY, root.progress)
+              width: win.realW
+              height: win.realH
+              transform: Scale {
+                xScale: root.lerp(1, panel.shrink, root.progress)
+                yScale: xScale
               }
 
-              // Selection is a ring plus a nudge in size. No fill and no dim on
-              // the others: in the exposé the windows are the content, and
-              // dimming five of six makes the whole view look switched off.
-              Rectangle {
+              Item {
+                id: shot
                 anchors.fill: parent
-                anchors.margins: -Math.round(3 * panel.uiScale)
-                radius: Math.max(4, Math.round(10 * panel.uiScale))
-                color: "transparent"
-                border.width: Math.max(2, Math.round(3 * panel.uiScale))
-                border.color: (win.isSelected && root.expanded) ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
-                Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                ScreencopyView {
+                  anchors.fill: parent
+                  // Null while hidden -- see the note in the Spaces strip.
+                  captureSource: root.shown ? win.modelData.wayland : null
+                  // Live while shown, and only while shown -- see the note in the
+                  // Spaces strip. These windows are on the visible desktop, so
+                  // the compositor renders them anyway.
+                  live: root.shown
+                  paintCursor: false
+                }
+
+                scale: win.isSelected && root.settled ? 1.02 : 1.0
+                Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
               }
 
-              scale: win.isSelected ? 1.02 : 1.0
-              Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+              HoverHandler {
+                id: winHover
+                // Only once the windows have settled: during the shrink they are
+                // sliding under a stationary pointer, so every window they pass
+                // under would grab the selection.
+                onHoveredChanged: if (hovered && root.settled) panel.selected = win.index
+              }
+
+              TapHandler {
+                onTapped: root.focusWindow(String(win.modelData.address))
+              }
+            }
+
+            // Selection is a ring plus a nudge in size. No fill and no dim on
+            // the others: in the exposé the windows are the content, and
+            // dimming five of six makes the whole view look switched off.
+            // Outside the scaled body so its border is not scaled down with it.
+            Rectangle {
+              x: win.targetX
+              y: win.targetY
+              width: win.targetW
+              height: win.targetH
+              scale: shot.scale
+              radius: Math.max(4, Math.round(10 * panel.uiScale))
+              color: "transparent"
+              border.width: Math.max(2, Math.round(3 * panel.uiScale))
+              border.color: (win.isSelected && root.settled) ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
+              Behavior on border.color { ColorAnimation { duration: 120 } }
             }
 
             // Icon straddling the bottom edge of the window with the title
             // under it -- the macOS arrangement. Capped against the window so a
             // small floating window does not get an icon wider than itself.
-            // Icon and title belong to the overview, not to the desktop, so
-            // they arrive as the shrink finishes rather than riding down with
-            // the window at full size -- which looked like the window had grown
-            // a label.
             Image {
               id: appIcon
-              width: Math.min(panel.iconSize, win.width * 0.4)
+              width: Math.min(panel.iconSize, win.targetW * 0.4)
               height: width
-              x: (win.width - width) / 2
-              y: win.height - height / 2
-              opacity: root.expanded ? 1 : 0
-              Behavior on opacity {
-                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
-              }
-              source: root.iconFor(win.ipc["class"])
+              x: win.targetX + (win.targetW - width) / 2
+              y: win.targetY + win.targetH - height / 2
+              opacity: win.labelOpacity
+              visible: opacity > 0
+              source: root.iconFor(win.ipc ? win.ipc["class"] : "")
               sourceSize.width: panel.iconSize
               sourceSize.height: panel.iconSize
               fillMode: Image.PreserveAspectFit
@@ -1140,36 +1354,22 @@ Item {
             }
 
             Text {
-              width: Math.max(win.width, panel.width * 0.16)
-              x: (win.width - width) / 2
+              width: Math.max(win.targetW, panel.width * 0.16)
+              x: win.targetX + (win.targetW - width) / 2
               y: appIcon.y + appIcon.height + Math.round(panel.titleSize * 0.5)
               horizontalAlignment: Text.AlignHCenter
               // Untrusted: see root.displayLabel.
               textFormat: Text.PlainText
-              text: root.displayLabel(win.modelData.title || win.ipc["class"] || "")
+              text: root.displayLabel(win.modelData.title || (win.ipc && win.ipc["class"]) || "")
               font.family: root.fontFamily
               font.pixelSize: panel.titleSize
               color: win.isSelected ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78)
-              opacity: root.expanded ? 1 : 0
-              Behavior on opacity {
-                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
-              }
+              opacity: win.labelOpacity
+              visible: opacity > 0
               elide: Text.ElideRight
               maximumLineCount: 1
               style: Text.Raised
               styleColor: Qt.rgba(0, 0, 0, 0.6)
-            }
-
-            HoverHandler {
-              id: winHover
-              // Only once the windows have settled: during the shrink they are
-              // sliding under a stationary pointer, so every window they pass
-              // under would grab the selection.
-              onHoveredChanged: if (hovered && root.expanded) panel.selected = win.index
-            }
-
-            TapHandler {
-              onTapped: root.focusWindow(String(win.modelData.address))
             }
           }
         }
@@ -1178,8 +1378,7 @@ Item {
         // that looks like something failed to load.
         Text {
           visible: panel.windows.length === 0
-          opacity: root.expanded ? 1 : 0
-          Behavior on opacity { NumberAnimation { duration: 140 } }
+          opacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
           anchors.horizontalCenter: parent.horizontalCenter
           y: panel.exposeAreaY + panel.exposeAreaH * 0.42
           textFormat: Text.PlainText

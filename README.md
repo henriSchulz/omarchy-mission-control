@@ -2,6 +2,10 @@
 
 A macOS-style workspace overview for [Omarchy](https://omarchy.org), as a shell plugin.
 
+Based on [AndyWeiBoan/omarchy-mission-control](https://github.com/AndyWeiBoan/omarchy-mission-control).
+This version adds a touchpad swipe that follows your fingers, and a smoother,
+GPU-transformed animation.
+
 ![Mission Control showing six desktop thumbnails across the top and the current desktop's window shrunk out beneath them](preview.png)
 
 A strip of live desktop thumbnails across the top, and underneath it the current
@@ -20,30 +24,38 @@ see.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/AndyWeiBoan/omarchy-mission-control --enable
+omarchy plugin add https://github.com/henriSchulz/omarchy-mission-control --enable
 ```
 
 Then bind a key — plugins cannot bind keys themselves. In `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("CTRL + UP", "Mission Control",
-  "omarchy-shell shell toggle io.github.andyweiboan.missioncontrol '{}'")
+  "omarchy-shell shell toggle henri.missioncontrol '{}'")
 
 -- Optional: a dedicated exit, so CTRL+UP is never an accidental re-open.
 o.bind("CTRL + DOWN", "Close Mission Control",
-  "omarchy-shell shell hide io.github.andyweiboan.missioncontrol")
+  "omarchy-shell shell hide henri.missioncontrol")
 ```
 
 For the legacy (non-Lua) Hyprland config format, see [`install/bindings.conf`](install/bindings.conf).
 
-Touchpad gestures are optional and live in [`install/gestures.lua`](install/gestures.lua):
-three- or four-finger swipe up to open, swipe down to close.
+Touchpad gestures are optional and live in [`install/gestures.lua`](install/gestures.lua).
+The overview tracks a four-finger vertical swipe live: the windows shrink as your
+fingers move, and on release it settles open or closed by distance and speed.
+Needs Hyprland 0.56+ (gesture callback tables). Log out and back in after adding it.
+
+For a smooth open, also turn off Hyprland's own layer fade for this surface:
+
+```lua
+hl.layer_rule({ match = { namespace = "mission-control" }, no_anim = true, animation = "none" })
+```
 
 ## Removal
 
 ```bash
-omarchy plugin disable io.github.andyweiboan.missioncontrol
-omarchy plugin remove  io.github.andyweiboan.missioncontrol
+omarchy plugin disable henri.missioncontrol
+omarchy plugin remove  henri.missioncontrol
 ```
 
 Then delete the two binds you added to `bindings.lua`, and the gestures from
