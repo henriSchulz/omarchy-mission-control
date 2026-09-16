@@ -216,8 +216,8 @@ Item {
     root.progress = 0;
   }
 
-  readonly property int shrinkDuration: 380
-  readonly property int fadeDuration: 150
+  readonly property int shrinkDuration: 240
+  readonly property int fadeDuration: 110
 
   // One animated number drives the whole shrink, 0 = real desktop, 1 = overview.
   // Every window, the strip and the labels derive from it, so they cannot drift
@@ -258,7 +258,7 @@ Item {
     }
     progressAnim.from = root.progress;
     progressAnim.to = to;
-    progressAnim.duration = Math.max(140, Math.min(root.shrinkDuration, dur));
+    progressAnim.duration = Math.max(90, Math.min(root.shrinkDuration, dur));
     progressAnim.easing.type = easing;
     progressAnim.start();
   }
@@ -277,8 +277,20 @@ Item {
   property real trackTravel: 0
   property real trackVelocity: 0 // progress per ms, positive = opening
   property real trackLastTime: 0
-  // Finger travel, in touchpad units, for a full open.
-  readonly property real gestureDistance: 320
+  // Finger travel, in touchpad units, for a full open. Short on purpose: a
+  // flick should be enough.
+  readonly property real gestureDistance: 150
+
+  // Safety net: a swipe whose end never arrives (a lost event, a gesture
+  // callback misconfigured in input.lua) must not leave the overview stuck
+  // half-open with tracking on -- that state ignores Escape and the close
+  // timers. Fingers moving produce updates every few ms, so silence this long
+  // means they are gone.
+  Timer {
+    id: trackWatchdog
+    interval: 350
+    onTriggered: if (root.tracking) root.handleGesture("end", 0, root.trackLastTime)
+  }
 
   Connections {
     target: Hyprland
@@ -304,6 +316,7 @@ Item {
       fadeOutSoon.stop();
       expandFallback.stop();
       root.tracking = true;
+      trackWatchdog.restart();
       root.stripHold = false;
       root.trackStart = Math.max(0, Math.min(1, root.progress));
       root.trackTravel = 0;
@@ -322,6 +335,7 @@ Item {
       if (value !== 0)
         root.handleGesture("update", value, time);
     } else if (phase === "update" && root.tracking) {
+      trackWatchdog.restart();
       // Swiping up is negative y; up opens.
       const step = -value / root.gestureDistance;
       root.trackTravel += step;
@@ -338,11 +352,12 @@ Item {
           : 1 + 0.06 * (1 - 1 / (1 + (raw - 1) * 3));
     } else if (phase === "end" && root.tracking) {
       root.tracking = false;
+      trackWatchdog.stop();
       // Fingers held still before lifting: no fling.
       if (time - root.trackLastTime > 80 || value === 1)
         root.trackVelocity = 0;
-      let open = root.progress + root.trackVelocity * 120 > 0.5;
-      if (Math.abs(root.trackVelocity) > 0.0015)
+      let open = root.progress + root.trackVelocity * 120 > 0.4;
+      if (Math.abs(root.trackVelocity) > 0.002)
         open = root.trackVelocity > 0;
       root.releasing = true;
       if (open) {
@@ -380,6 +395,12 @@ Item {
   }
 
   function setShown(next) {
+    // An explicit open or close always wins over a swipe in progress, so
+    // Escape, a click or the keybind can never be locked out by one.
+    if (root.tracking && !root.releasing) {
+      root.tracking = false;
+      trackWatchdog.stop();
+    }
     root.opened = next;
     if (next) {
       // Pressed again mid-close: the surface is still up, so just re-expand

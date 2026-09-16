@@ -29,6 +29,7 @@ hl.gesture({
   action = {
     start = function(e) mc_event("start", string.format("%.3f", e.delta and e.delta.y or 0), e.time_ms) end,
     update = function(e) mc_event("update", string.format("%.3f", e.delta and e.delta.y or 0), e.time_ms) end,
-    ["end"] = function(e) mc_event("end", e.cancelled and 1 or 0, e.time_ms) end,
+    -- Hyprland names the release callback `finish`, not `end`.
+    finish = function(e) mc_event("end", e.cancelled and 1 or 0, e.time_ms) end,
   },
 })
