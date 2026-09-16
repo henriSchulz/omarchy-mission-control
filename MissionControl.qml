@@ -156,6 +156,47 @@ Item {
     onTriggered: root.refreshWallpaper()
   }
 
+  // --- window decoration ----------------------------------------------------
+  // At progress 0 each copy has to look exactly like the real window, or the
+  // swipe starts with a pop: captures carry no border and no rounded corners,
+  // those are drawn by Hyprland. Read them from Hyprland on each open, since a
+  // theme switch changes the border colours.
+  property int decoRounding: 12
+  property int decoBorder: 2
+  property color decoActive: "#ffd3ae78"
+  property color decoInactive: "#aa595959"
+
+  Process {
+    id: decoProbe
+    command: ["/usr/bin/hyprctl", "-j", "--batch",
+      "getoption general:col.active_border; getoption general:col.inactive_border; getoption general:border_size; getoption decoration:rounding"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        const lines = String(text || "").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line.startsWith("{"))
+            continue;
+          let o;
+          try { o = JSON.parse(line); } catch (e) { continue; }
+          // First colour of a gradient; the shape is checked, not trusted.
+          const grad = String(o.gradient || "").split(" ")[0];
+          const colour = /^[0-9a-fA-F]{8}$/.test(grad) ? "#" + grad : "";
+          const num = Number(o["int"]);
+          if (o.option === "general:col.active_border" && colour) root.decoActive = colour;
+          else if (o.option === "general:col.inactive_border" && colour) root.decoInactive = colour;
+          else if (o.option === "general:border_size" && num >= 0 && num <= 20) root.decoBorder = num;
+          else if (o.option === "decoration:rounding" && num >= 0 && num <= 64) root.decoRounding = num;
+        }
+      }
+    }
+  }
+
+  // The selection ring only appears once the user starts choosing -- arrow
+  // keys, Tab or the pointer. Showing it on arrival made the first window pop
+  // a white frame and grow at the end of every open, which macOS does not do.
+  property bool showSelection: false
+
   // --- state machine ------------------------------------------------------
 
   // Surface up, with every window still drawn at its real size and position.
@@ -185,9 +226,27 @@ Item {
   // 0.148 -> 0.180 -> 0.143 over ~130ms, exactly the fade duration. That bump
   // was the flash. Compositor-side opacity composites our surface first and
   // then blends the result, which is what we actually meant.
-  property real contentOpacity: root.contentVisible ? 1 : 0
-  Behavior on contentOpacity {
-    NumberAnimation { duration: root.fadeDuration; easing.type: Easing.InOutQuad }
+  //
+  // Fades OUT only. Showing is instant: the first frame is meant to be
+  // identical to the desktop underneath, so fading it in just shows the real
+  // windows and our copies at the same time -- measured off a 60fps capture,
+  // that double image was the "overlapping windows" on every swipe.
+  property real contentOpacity: 0
+  NumberAnimation {
+    id: contentFade
+    target: root
+    property: "contentOpacity"
+    to: 0
+    duration: root.fadeDuration
+    easing.type: Easing.InQuad
+  }
+  onContentVisibleChanged: {
+    if (root.contentVisible) {
+      contentFade.stop();
+      root.contentOpacity = 1;
+    } else {
+      contentFade.start();
+    }
   }
 
   // The Spaces strip slides in on open and then STAYS PUT until the surface is
@@ -217,7 +276,7 @@ Item {
   }
 
   readonly property int shrinkDuration: 240
-  readonly property int fadeDuration: 110
+  readonly property int fadeDuration: 90
 
   // One animated number drives the whole shrink, 0 = real desktop, 1 = overview.
   // Every window, the strip and the labels derive from it, so they cannot drift
@@ -328,6 +387,8 @@ Item {
         Hyprland.refreshMonitors();
         Hyprland.refreshWorkspaces();
         Hyprland.refreshToplevels();
+        if (!decoProbe.running) decoProbe.running = true;
+        root.showSelection = false;
         root.shown = true;
       }
       // Hyprland only starts a gesture once the fingers have moved, and that
@@ -438,6 +499,8 @@ Item {
       Hyprland.refreshMonitors();
       Hyprland.refreshWorkspaces();
       Hyprland.refreshToplevels();
+      if (!decoProbe.running) decoProbe.running = true;
+      root.showSelection = false;
       root.contentVisible = true;
       root.shown = true;
       // The shrink is started by the window itself, once its surface is
@@ -457,8 +520,11 @@ Item {
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
       const dur = progressAnim.running ? progressAnim.duration : 0;
-      fadeOutSoon.interval = Math.round(dur * 0.55);
-      collapseThenHide.interval = Math.max(dur, Math.round(dur * 0.55) + root.fadeDuration);
+      // OutQuart is ~99% home at 70%: the copy is then indistinguishable from
+      // the desktop, so a short fade over the tail hands over without the
+      // full-size copy lingering on screen.
+      fadeOutSoon.interval = Math.round(dur * 0.7);
+      collapseThenHide.interval = Math.max(dur, Math.round(dur * 0.7) + root.fadeDuration) + 16;
       fadeOutSoon.restart();
       collapseThenHide.restart();
     }
@@ -655,7 +721,59 @@ Item {
       visible: root.shown
 
       // Whole-surface opacity, handed to Hyprland. See contentOpacity.
-      HyprlandWindow.opacity: root.contentOpacity
+      //
+      // Held at 0 until every window copy has its first frame. A capture
+      // context only exists while shown, and its first buffer arrives a few
+      // frames after the surface maps -- revealing before that showed bare
+      // wallpaper where the windows had been, for 2-3 frames at the start of
+      // every swipe. Transparent until then, the real desktop simply stays
+      // visible underneath.
+      HyprlandWindow.opacity: panel.revealed ? root.contentOpacity : 0
+
+      property bool revealed: false
+      readonly property bool capturesReady: {
+        const n = exposeRepeater.count;
+        for (let i = 0; i < n; i++) {
+          const item = exposeRepeater.itemAt(i);
+          if (item && !item.captureReady)
+            return false;
+        }
+        return true;
+      }
+      // Latched: a window opening while the overview is up must not blank it.
+      onCapturesReadyChanged: if (panel.capturesReady && root.shown) panel.revealed = true
+      Connections {
+        target: root
+        function onShownChanged() {
+          if (root.shown) {
+            if (panel.capturesReady) panel.revealed = true;
+            else revealTimeout.restart();
+          } else {
+            revealTimeout.stop();
+            panel.revealed = false;
+          }
+        }
+      }
+      // While hidden, refresh the kept frames now and then, so what shows for
+      // the first frames of an open is recent rather than from the last open.
+      Timer {
+        interval: 1500
+        repeat: true
+        running: !root.shown
+        onTriggered: {
+          for (let i = 0; i < exposeRepeater.count; i++) {
+            const item = exposeRepeater.itemAt(i);
+            if (item) item.recapture();
+          }
+        }
+      }
+
+      // A window that never delivers a frame must not keep the overview away.
+      Timer {
+        id: revealTimeout
+        interval: 250
+        onTriggered: if (root.shown) panel.revealed = true
+      }
 
       // `visible` is our intent; `backingWindowVisible` is the surface actually
       // being up, which is what the shrink has to start from. One more frame
@@ -663,11 +781,14 @@ Item {
       // desktop -- is painted at least once and the animation has somewhere to
       // come from.
       onBackingWindowVisibleChanged: {
-        if (backingWindowVisible && root.opened)
+        if (backingWindowVisible && panel.revealed && root.opened)
           firstFrame.start();
         else
           firstFrame.stop();
       }
+      // The keyboard open waits for the reveal too, or its first frames play
+      // while the surface is still held transparent.
+      onRevealedChanged: if (panel.revealed && panel.backingWindowVisible && root.opened) firstFrame.start()
 
       Timer {
         id: firstFrame
@@ -912,24 +1033,55 @@ Item {
       // thing -- makes hyprbars' title bars flicker between transparent and
       // coloured every time they redraw, and
       // decoration:blur:new_optimizations = false does not stop it.
-      Image {
-        id: wallpaper
+      // The desktop's top bar is a layer below ours. Where it sits, our copy
+      // of the wallpaper starts transparent -- so the real bar stays visible --
+      // and fades in as the Spaces strip slides over it. Covering it at once
+      // made the bar vanish in one frame when a swipe began, and reappear in
+      // one frame when the overview was gone.
+      readonly property real barBand: Math.max(0, Math.min(panel.height, panel.reserved[1]))
+
+      Item {
         anchors.fill: parent
-        source: root.wallpaperSource
-        fillMode: Image.PreserveAspectCrop
-        // Do NOT add sourceSize here. Omarchy's wallpapers are 5K and the
-        // obvious "decode it smaller" made the window *slower* to appear --
-        // 505ms against 341ms -- because Qt still parses the whole JPEG and
-        // then does a smooth scale on top. Matching the size on the strip
-        // thumbnails so they share one cache entry did not recover it either
-        // (496ms). Measured, twice.
-        // Asynchronous. The helper checks the target is a bounded regular file
-        // but cannot hold it -- the link can be replaced between that check and
-        // this load -- so decoding off the main thread bounds the consequence
-        // rather than the input: a late background instead of a shell that
-        // renders and stops answering.
-        asynchronous: true
-        cache: true
+        anchors.topMargin: panel.barBand
+        clip: true
+        Image {
+          y: -panel.barBand
+          width: panel.width
+          height: panel.height
+          source: wallpaper.source
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          cache: true
+        }
+      }
+
+      Item {
+        width: panel.width
+        height: panel.barBand
+        clip: true
+        Image {
+          id: wallpaper
+          // Only the bar band; the rest is the clipped copy above. Same source
+          // and size, so both share one decoded image.
+          width: panel.width
+          height: panel.height
+          opacity: root.stripProgress
+          source: root.wallpaperSource
+          fillMode: Image.PreserveAspectCrop
+          // Do NOT add sourceSize here. Omarchy's wallpapers are 5K and the
+          // obvious "decode it smaller" made the window *slower* to appear --
+          // 505ms against 341ms -- because Qt still parses the whole JPEG and
+          // then does a smooth scale on top. Matching the size on the strip
+          // thumbnails so they share one cache entry did not recover it either
+          // (496ms). Measured, twice.
+          // Asynchronous. The helper checks the target is a bounded regular file
+          // but cannot hold it -- the link can be replaced between that check and
+          // this load -- so decoding off the main thread bounds the consequence
+          // rather than the input: a late background instead of a shell that
+          // renders and stops answering.
+          asynchronous: true
+          cache: true
+        }
       }
 
       // A whisper of dim, so the shrunken windows have something to sit
@@ -937,7 +1089,9 @@ Item {
       Rectangle {
         anchors.fill: parent
         color: "#0b0d14"
-        opacity: 0.14
+        // Grows with the shrink; a constant dim darkened the screen in one
+        // step the moment a swipe began.
+        opacity: 0.14 * Math.max(0, Math.min(1, root.progress))
       }
 
       // Click anywhere that is not a window or a desktop to dismiss. A
@@ -957,9 +1111,9 @@ Item {
         // windows of whichever desktop you landed on.
         Keys.onLeftPressed: panel.stepDesktop(-1)
         Keys.onRightPressed: panel.stepDesktop(1)
-        Keys.onUpPressed: panel.move(0, -1)
-        Keys.onDownPressed: panel.move(0, 1)
-        Keys.onTabPressed: panel.cycleWindow()
+        Keys.onUpPressed: { root.showSelection = true; panel.move(0, -1) }
+        Keys.onDownPressed: { root.showSelection = true; panel.move(0, 1) }
+        Keys.onTabPressed: { root.showSelection = true; panel.cycleWindow() }
         Keys.onReturnPressed: panel.activateSelection()
         Keys.onEnterPressed: panel.activateSelection()
 
@@ -1245,6 +1399,7 @@ Item {
 
         // --- exposé of the current desktop ----------------------------------
         Repeater {
+          id: exposeRepeater
           model: panel.windows
 
           delegate: Item {
@@ -1253,6 +1408,11 @@ Item {
             required property int index
             readonly property var ipc: modelData.lastIpcObject
             readonly property bool isSelected: panel.selected === win.index
+            readonly property bool captureReady: copy.hasContent
+            function recapture() {
+              if (copy.hasContent || copy.captureSource)
+                copy.captureFrame();
+            }
 
             // Two rects per window, and the animation between them is the
             // whole effect.
@@ -1306,23 +1466,64 @@ Item {
                 yScale: xScale
               }
 
+              // Hyprland's border, drawn outside the window like Hyprland does.
+              // Fades out over the shrink: in the overview windows are bare.
+              Rectangle {
+                anchors.fill: parent
+                anchors.margins: -root.decoBorder
+                radius: root.decoRounding + root.decoBorder
+                color: "transparent"
+                border.width: root.decoBorder
+                border.color: win.modelData.activated ? root.decoActive : root.decoInactive
+                opacity: Math.max(0, 1 - root.progress * 2)
+                visible: opacity > 0 && root.decoBorder > 0
+                scale: shot.scale
+              }
+
               Item {
                 id: shot
                 anchors.fill: parent
 
+                // Rounded like the real window. The layer also gives the
+                // scaled-down copy smooth filtering instead of shimmering.
+                layer.enabled: root.decoRounding > 0
+                layer.smooth: true
+                layer.effect: MultiEffect {
+                  maskEnabled: true
+                  maskSource: winMask
+                  maskThresholdMin: 0.5
+                  maskSpreadAtMin: 1.0
+                }
+
                 ScreencopyView {
+                  id: copy
                   anchors.fill: parent
-                  // Null while hidden -- see the note in the Spaces strip.
-                  captureSource: root.shown ? win.modelData.wayland : null
-                  // Live while shown, and only while shown -- see the note in the
-                  // Spaces strip. These windows are on the visible desktop, so
-                  // the compositor renders them anyway.
+                  // Kept alive while hidden, unlike the strip thumbnails. A
+                  // context created on open delivers its first buffer 2-3
+                  // frames after the surface maps, and until then the window
+                  // is simply missing from the screen -- measured off a 60fps
+                  // capture of every open. These are only the current
+                  // desktop's windows, so a live context costs one capture on
+                  // creation and one per refresh below, nothing per frame.
+                  captureSource: win.modelData.wayland
                   live: root.shown
                   paintCursor: false
                 }
 
-                scale: win.isSelected && root.settled ? 1.02 : 1.0
+                scale: win.isSelected && root.settled && root.showSelection ? 1.02 : 1.0
                 Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+              }
+
+              Item {
+                id: winMask
+                anchors.fill: parent
+                layer.enabled: true
+                visible: false
+                Rectangle {
+                  anchors.fill: parent
+                  radius: root.decoRounding
+                  color: "black"
+                }
               }
 
               HoverHandler {
@@ -1330,7 +1531,10 @@ Item {
                 // Only once the windows have settled: during the shrink they are
                 // sliding under a stationary pointer, so every window they pass
                 // under would grab the selection.
-                onHoveredChanged: if (hovered && root.settled) panel.selected = win.index
+                onHoveredChanged: if (hovered && root.settled) {
+                  root.showSelection = true;
+                  panel.selected = win.index;
+                }
               }
 
               TapHandler {
@@ -1351,7 +1555,10 @@ Item {
               radius: Math.max(4, Math.round(10 * panel.uiScale))
               color: "transparent"
               border.width: Math.max(2, Math.round(3 * panel.uiScale))
-              border.color: (win.isSelected && root.settled) ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
+              // Gone the instant a close starts: left at the overview rect while
+              // the window grows back, it was a ghost frame on every close.
+              visible: root.settled && root.showSelection
+              border.color: win.isSelected ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
               Behavior on border.color { ColorAnimation { duration: 120 } }
             }
 
