@@ -268,8 +268,10 @@ Item {
   readonly property real stripProgress: root.stripHold ? 1 : Math.max(0, Math.min(1, root.progress))
   // Reset for the next open, once nothing is on screen to see it move.
   onShownChanged: {
+    root.setSwipeMode(root.shown);
     if (root.shown)
       return;
+    root.resetSlide();
     root.stripHold = false;
     progressAnim.stop();
     progressSpring.stop();
@@ -365,17 +367,27 @@ Item {
     onTriggered: root.stepSpring(Math.min(frameTime, 1 / 30))
   }
 
-  function stepSpring(dt) {
-    // Semi-implicit Euler in sub-steps; stable for these stiffnesses.
+  // One step of a critically damped spring: [position, velocity] after dt
+  // seconds. Semi-implicit Euler in sub-steps; stable for these stiffnesses.
+  function springStep(x, v, target, w, dt) {
     const steps = Math.max(1, Math.ceil(dt / 0.004));
     const h = dt / steps;
-    const w = root.springOmega;
-    let x = root.progress;
-    let v = root.springVelocity;
     for (let i = 0; i < steps; i++) {
-      v += (w * w * (root.springTarget - x) - 2 * w * v) * h;
+      v += (w * w * (target - x) - 2 * w * v) * h;
       x += v * h;
     }
+    return [x, v];
+  }
+
+  // Past the end of a swipe's range: resist, a little, like a rubber band.
+  function rubberBand(over) {
+    return 0.06 * (1 - 1 / (1 + over * 3));
+  }
+
+  function stepSpring(dt) {
+    const next = root.springStep(root.progress, root.springVelocity, root.springTarget, root.springOmega, dt);
+    let x = next[0];
+    let v = next[1];
     if (!root.tracking && Math.abs(root.springTarget - x) < 0.001 && Math.abs(v) < 0.01) {
       x = root.springTarget;
       v = 0;
@@ -397,6 +409,158 @@ Item {
       t += 0.004;
     }
     return Math.round(t * 1000);
+  }
+
+  // --- sideways swipe between desktops ---------------------------------------
+  // While the overview is up, input.lua hands the horizontal four-finger swipe
+  // to us (mission_control_swipe_mode) instead of Hyprland's workspace swipe,
+  // which would only animate the real desktops hidden behind this surface. The
+  // exposé then slides sideways under the fingers with the neighbouring desktop
+  // coming in beside it, like Spaces in macOS Mission Control.
+  //
+  // `slide` is in pages: desktop k is drawn ((k - current) + slide) screen
+  // widths across, so -1 has the next desktop centred. The switch is dispatched
+  // on release; when Hyprland reports it, `slide` is rebased by the same step,
+  // so nothing on screen moves and the spring simply carries on to 0. Arrow keys
+  // go through the same rebase and so slide too.
+  property real slide: 0
+  property real slideTarget: 0
+  property real slideVelocity: 0 // pages per second
+  property real slideOmega: root.springOmegaTracking
+  property bool slideTracking: false
+  property real slideStart: 0
+  property real slideTravel: 0
+  property real slideTrackVelocity: 0 // pages per ms, negative = towards next
+  property real slideLastTime: 0
+  // Whether there is a desktop either side; kept by the focused monitor's panel.
+  property bool slideCanPrev: false
+  property bool slideCanNext: false
+  // Direction of a switch we dispatched, so the rebase goes the way the user
+  // went even when the keyboard wraps around the ends.
+  property int slidePendingDir: 0
+  // Touchpad units per page, same as gestures:workspace_swipe_distance.
+  readonly property real slideDistance: 500
+
+  signal slideRequested(int dir)
+
+  FrameAnimation {
+    id: slideSpring
+    onTriggered: {
+      const next = root.springStep(root.slide, root.slideVelocity, root.slideTarget, root.slideOmega,
+                                   Math.min(frameTime, 1 / 30));
+      let x = next[0];
+      let v = next[1];
+      if (!root.slideTracking && Math.abs(root.slideTarget - x) < 0.001 && Math.abs(v) < 0.01) {
+        x = root.slideTarget;
+        v = 0;
+        slideSpring.stop();
+      }
+      root.slideVelocity = v;
+      root.slide = x;
+    }
+  }
+
+  Timer {
+    id: slideWatchdog
+    interval: 350
+    onTriggered: if (root.slideTracking) root.handleSlide("end", 0, root.slideLastTime)
+  }
+
+  function setSwipeMode(on) {
+    // The swap lives in input.lua; without the Lua config there is nothing to
+    // call and Hyprland's own workspace swipe simply stays.
+    if (!Hyprland.usingLua)
+      return;
+    Hyprland.dispatch("function() if mission_control_swipe_mode then mission_control_swipe_mode("
+                      + (on ? "true" : "false") + ") end end");
+  }
+  Component.onDestruction: root.setSwipeMode(false)
+
+  function resetSlide() {
+    slideSpring.stop();
+    slideWatchdog.stop();
+    root.slideTracking = false;
+    root.slidePendingDir = 0;
+    root.slide = 0;
+    root.slideTarget = 0;
+    root.slideVelocity = 0;
+  }
+
+  // Release towards `target`, on the slower spring, never overshooting it.
+  function settleSlide(target) {
+    root.slideTarget = target;
+    root.slideOmega = root.springOmegaRelease;
+    const dist = Math.abs(target - root.slide);
+    const toward = (target - root.slide) * root.slideVelocity;
+    const cap = root.springOmegaRelease * dist;
+    if (toward > 0 && Math.abs(root.slideVelocity) > cap)
+      root.slideVelocity = Math.sign(root.slideVelocity) * cap;
+    slideSpring.start();
+  }
+
+  // The desktop changed by `step` while shown: keep every page where it is.
+  function rebaseSlide(step) {
+    root.slide += step;
+    root.slideStart += step;
+    if (root.slideTracking) {
+      root.slideTarget += step;
+      slideSpring.start();
+    } else {
+      root.settleSlide(0);
+    }
+  }
+
+  function handleSlide(phase, value, time) {
+    if (phase === "start") {
+      if (!root.opened)
+        return;
+      root.slideTracking = true;
+      slideWatchdog.restart();
+      if (!slideSpring.running)
+        root.slideVelocity = 0;
+      root.slideOmega = root.springOmegaTracking;
+      root.slideStart = root.slideTarget;
+      root.slideTravel = 0;
+      root.slideTrackVelocity = 0;
+      root.slideLastTime = time;
+      if (value !== 0)
+        root.handleSlide("update", value, time);
+    } else if (phase === "update" && root.slideTracking) {
+      slideWatchdog.restart();
+      // Fingers left is negative x, and brings in the next desktop.
+      const step = value / root.slideDistance;
+      root.slideTravel += step;
+      const dt = time - root.slideLastTime;
+      if (dt > 0) {
+        root.slideTrackVelocity = root.slideTrackVelocity * 0.5 + (step / dt) * 0.5;
+        root.slideLastTime = time;
+      }
+      const raw = root.slideStart + root.slideTravel;
+      const lo = root.slideCanNext ? -1 : 0;
+      const hi = root.slideCanPrev ? 1 : 0;
+      root.slideTarget = raw < lo ? lo - root.rubberBand(lo - raw)
+          : raw > hi ? hi + root.rubberBand(raw - hi)
+          : raw;
+      if (!slideSpring.running)
+        slideSpring.start();
+    } else if (phase === "end" && root.slideTracking) {
+      root.slideTracking = false;
+      slideWatchdog.stop();
+      if (time - root.slideLastTime > 80 || value === 1)
+        root.slideTrackVelocity = 0;
+      // A flick decides by its direction, a slow drag by how far it got.
+      const v = root.slideTrackVelocity;
+      let side = 0;
+      if (Math.abs(v) > 0.0006)
+        side = v < 0 ? -1 : 1;
+      else if (Math.abs(root.slideTarget + v * 120) > 0.25)
+        side = root.slideTarget < 0 ? -1 : 1;
+      if ((side < 0 && !root.slideCanNext) || (side > 0 && !root.slideCanPrev))
+        side = 0;
+      root.settleSlide(side);
+      if (side !== 0)
+        root.slideRequested(-side);
+    }
   }
 
   // --- touchpad swipe -------------------------------------------------------
@@ -434,14 +598,18 @@ Item {
       if (event.name !== "custom")
         return;
       const data = String(event.data || "");
-      if (!data.startsWith("mission-control-gesture:") || data.length > 96)
+      const sideways = data.startsWith("mission-control-hswipe:");
+      if ((!sideways && !data.startsWith("mission-control-gesture:")) || data.length > 96)
         return;
       const parts = data.split(":");
       const value = Number(parts[2]);
       const time = Number(parts[3]);
       if (!isFinite(value) || !isFinite(time))
         return;
-      root.handleGesture(parts[1], value, time);
+      if (sideways)
+        root.handleSlide(parts[1], value, time);
+      else
+        root.handleGesture(parts[1], value, time);
     }
   }
 
@@ -491,7 +659,7 @@ Item {
       // Past fully open: resist, a little, like a rubber band.
       root.springTarget = raw <= 0 ? 0
           : raw <= 1 ? raw
-          : 1 + 0.06 * (1 - 1 / (1 + (raw - 1) * 3));
+          : 1 + root.rubberBand(raw - 1);
       if (!progressSpring.running)
         progressSpring.start();
     } else if (phase === "end" && root.tracking) {
@@ -944,11 +1112,13 @@ Item {
       // order puts the one you are coming back to in the top-left.
       property var windows: []
       onWindowsLiveChanged: if (!root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
-      readonly property var windowsLive: {
+      readonly property var windowsLive: panel.windowsOf(panel.currentDesktop)
+
+      function windowsOf(desk) {
         const out = [];
-        if (!panel.currentDesktop)
+        if (!desk)
           return out;
-        const tls = panel.currentDesktop.toplevels ? (panel.currentDesktop.toplevels.values || []) : [];
+        const tls = desk.toplevels ? (desk.toplevels.values || []) : [];
         for (let i = 0; i < tls.length; i++) {
           const t = tls[i];
           const o = t.lastIpcObject;
@@ -958,6 +1128,50 @@ Item {
         }
         out.sort((a, b) => (a.lastIpcObject.focusHistoryID || 0) - (b.lastIpcObject.focusHistoryID || 0));
         return out;
+      }
+
+      // The desktop `rel` places from the current one, or null past the ends.
+      function desktopAt(rel) {
+        const i = panel.desktops.indexOf(panel.currentDesktop);
+        const j = i + rel;
+        return (i < 0 || j < 0 || j >= panel.desktops.length) ? null : panel.desktops[j];
+      }
+
+      // --- sideways swipe ---------------------------------------------------
+      // Only the focused monitor's overview slides; the others stay put.
+      readonly property bool slideOwner: panel.hyprMonitor !== null && panel.hyprMonitor.focused
+      readonly property real slideX: panel.slideOwner ? root.slide * panel.width : 0
+      Binding { target: root; property: "slideCanPrev"; value: panel.desktopAt(-1) !== null; when: panel.slideOwner }
+      Binding { target: root; property: "slideCanNext"; value: panel.desktopAt(1) !== null; when: panel.slideOwner }
+
+      Connections {
+        target: root
+        function onSlideRequested(dir) {
+          if (!panel.slideOwner)
+            return;
+          const next = panel.desktopAt(dir);
+          const target = next ? root.safeWorkspaceId(next.id) : "";
+          if (target === "")
+            return;
+          root.slidePendingDir = dir;
+          root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })", "workspace " + target);
+        }
+      }
+
+      property int deskIndex: -1
+      onCurrentDesktopChanged: {
+        const i = panel.desktops.indexOf(panel.currentDesktop);
+        const old = panel.deskIndex;
+        panel.deskIndex = i;
+        if (!panel.slideOwner || !root.shown || old < 0 || i < 0 || i === old)
+          return;
+        const step = root.slidePendingDir !== 0 ? root.slidePendingDir : i - old;
+        root.slidePendingDir = 0;
+        // A jump further than one desktop has no page in between to slide past.
+        if (Math.abs(step) === 1)
+          root.rebaseSlide(step);
+        else
+          root.resetSlide();
       }
 
       // --- geometry ---------------------------------------------------------
@@ -1027,10 +1241,7 @@ Item {
       // than on the desktop rect is what makes the gap under the Spaces strip a
       // fixed ratio: whatever the bar reserves, the topmost window always lands
       // exposeGapTop below the strip. Horizontally the block is centred.
-      readonly property var bbox: {
-        const ws = panel.windows;
-        if (ws.length === 0)
-          return null;
+      function originFor(ws) {
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
         for (let i = 0; i < ws.length; i++) {
           const o = ws[i].lastIpcObject;
@@ -1042,14 +1253,16 @@ Item {
           x1 = Math.max(x1, o.at[0] + o.size[0]);
           y1 = Math.max(y1, o.at[1] + o.size[1]);
         }
-        return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        if (x0 === Infinity)
+          return { x: panel.exposeAreaX, y: panel.exposeAreaY };
+        return {
+          x: panel.exposeAreaX + (panel.exposeAreaW - (x1 - x0) * panel.shrink) / 2 - (x0 - panel.monX) * panel.shrink,
+          y: panel.exposeAreaY - (y0 - panel.monY) * panel.shrink
+        };
       }
-      readonly property real originX: bbox
-          ? exposeAreaX + (exposeAreaW - bbox.w * shrink) / 2 - (bbox.x - panel.monX) * shrink
-          : exposeAreaX
-      readonly property real originY: bbox
-          ? exposeAreaY - (bbox.y - panel.monY) * shrink
-          : exposeAreaY
+      readonly property var origin: panel.originFor(panel.windows)
+      readonly property real originX: origin.x
+      readonly property real originY: origin.y
 
       // Icon and title sizes come off the screen, not off the window, so every
       // label in the view is the same size -- measured at ~2.3% and ~0.85% of
@@ -1243,6 +1456,7 @@ Item {
         const target = root.safeWorkspaceId(next.id);
         if (target === "")
           return;
+        root.slidePendingDir = dir;
         root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })",
                       "workspace " + target);
       }
@@ -1481,223 +1695,348 @@ Item {
           }
         }
 
-        // --- exposé of the current desktop ----------------------------------
-        Repeater {
-          id: exposeRepeater
-          model: panel.windows
+        // The current desktop's exposé rides on the sideways swipe.
+        Item {
+          id: exposeLayer
+          x: panel.slideX
+          width: parent.width
+          height: parent.height
 
-          delegate: Item {
-            id: win
-            required property var modelData
-            required property int index
-            readonly property var ipc: modelData.lastIpcObject
-            readonly property bool isSelected: panel.selected === win.index
-            readonly property bool captureReady: copy.hasContent
-            function recapture() {
-              if (copy.hasContent || copy.captureSource)
-                copy.captureFrame();
-            }
+          // --- exposé of the current desktop ----------------------------------
+          Repeater {
+            id: exposeRepeater
+            model: panel.windows
 
-            // Two rects per window, and the animation between them is the
-            // whole effect.
-            //
-            // "real" is where the window is on the actual desktop: this layer
-            // covers the screen one-to-one and the wallpaper underneath is the
-            // real one, so a window drawn here at scale 1 sits exactly on top
-            // of itself. That is the frame the open starts from, which is why
-            // it reads as the desktop shrinking rather than a new screen
-            // appearing.
-            //
-            // "target" is its place in the overview: the same position and size
-            // scaled by the one factor every window shares.
-            // Screen-relative: what Hyprland reports, minus this monitor's
-            // origin. The overview layout is built in this space.
-            // Guarded for the same reason as the strip thumbnails above:
-            // lastIpcObject can go undefined under a live binding.
-            readonly property var at: (ipc && ipc.at) ? ipc.at : [0, 0]
-            readonly property var size: (ipc && ipc.size) ? ipc.size : [0, 0]
-
-            readonly property real screenX: at[0] - panel.monX
-            readonly property real screenY: at[1] - panel.monY
-
-            readonly property real realX: screenX
-            readonly property real realY: screenY
-            readonly property real realW: size[0]
-            readonly property real realH: size[1]
-            readonly property real targetX: panel.originX + screenX * panel.shrink
-            readonly property real targetY: panel.originY + screenY * panel.shrink
-            readonly property real targetW: realW * panel.shrink
-            readonly property real targetH: realH * panel.shrink
-
-            // Labels and the selection ring belong to the overview, so they
-            // sit at the target rect and fade in over the last stretch of the
-            // shrink instead of riding down at full size.
-            readonly property real labelOpacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
-
-            // The window itself. Its size never changes -- it stays at the real
-            // size and is moved and scaled with a transform. Animating
-            // width/height (as before) re-laid-out the capture, ring, icon and
-            // title every frame; a transform is just a matrix on the GPU. Scale
-            // is uniform, so this is the same motion as before, only cheaper.
-            Item {
-              id: body
-              x: root.lerp(win.realX, win.targetX, root.progress)
-              y: root.lerp(win.realY, win.targetY, root.progress)
-              width: win.realW
-              height: win.realH
-              transform: Scale {
-                xScale: root.lerp(1, panel.shrink, root.progress)
-                yScale: xScale
+            delegate: Item {
+              id: win
+              required property var modelData
+              required property int index
+              readonly property var ipc: modelData.lastIpcObject
+              readonly property bool isSelected: panel.selected === win.index
+              readonly property bool captureReady: copy.hasContent
+              function recapture() {
+                if (copy.hasContent || copy.captureSource)
+                  copy.captureFrame();
               }
 
-              // Hyprland's border, drawn outside the window like Hyprland does.
-              // Fades out over the shrink: in the overview windows are bare.
-              Rectangle {
-                anchors.fill: parent
-                anchors.margins: -root.decoBorder
-                radius: root.decoRounding + root.decoBorder
-                color: "transparent"
-                border.width: root.decoBorder
-                border.color: win.modelData.activated ? root.decoActive : root.decoInactive
-                opacity: Math.max(0, 1 - root.progress * 2)
-                visible: opacity > 0 && root.decoBorder > 0
-                scale: shot.scale
-              }
+              // Two rects per window, and the animation between them is the
+              // whole effect.
+              //
+              // "real" is where the window is on the actual desktop: this layer
+              // covers the screen one-to-one and the wallpaper underneath is the
+              // real one, so a window drawn here at scale 1 sits exactly on top
+              // of itself. That is the frame the open starts from, which is why
+              // it reads as the desktop shrinking rather than a new screen
+              // appearing.
+              //
+              // "target" is its place in the overview: the same position and size
+              // scaled by the one factor every window shares.
+              // Screen-relative: what Hyprland reports, minus this monitor's
+              // origin. The overview layout is built in this space.
+              // Guarded for the same reason as the strip thumbnails above:
+              // lastIpcObject can go undefined under a live binding.
+              readonly property var at: (ipc && ipc.at) ? ipc.at : [0, 0]
+              readonly property var size: (ipc && ipc.size) ? ipc.size : [0, 0]
 
+              readonly property real screenX: at[0] - panel.monX
+              readonly property real screenY: at[1] - panel.monY
+
+              readonly property real realX: screenX
+              readonly property real realY: screenY
+              readonly property real realW: size[0]
+              readonly property real realH: size[1]
+              readonly property real targetX: panel.originX + screenX * panel.shrink
+              readonly property real targetY: panel.originY + screenY * panel.shrink
+              readonly property real targetW: realW * panel.shrink
+              readonly property real targetH: realH * panel.shrink
+
+              // Labels and the selection ring belong to the overview, so they
+              // sit at the target rect and fade in over the last stretch of the
+              // shrink instead of riding down at full size.
+              readonly property real labelOpacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
+
+              // The window itself. Its size never changes -- it stays at the real
+              // size and is moved and scaled with a transform. Animating
+              // width/height (as before) re-laid-out the capture, ring, icon and
+              // title every frame; a transform is just a matrix on the GPU. Scale
+              // is uniform, so this is the same motion as before, only cheaper.
               Item {
-                id: shot
-                anchors.fill: parent
-
-                // Rounded like the real window. The layer also gives the
-                // scaled-down copy smooth filtering instead of shimmering.
-                layer.enabled: root.decoRounding > 0
-                layer.smooth: true
-                layer.effect: MultiEffect {
-                  maskEnabled: true
-                  maskSource: winMask
-                  maskThresholdMin: 0.5
-                  maskSpreadAtMin: 1.0
+                id: body
+                x: root.lerp(win.realX, win.targetX, root.progress)
+                y: root.lerp(win.realY, win.targetY, root.progress)
+                width: win.realW
+                height: win.realH
+                transform: Scale {
+                  xScale: root.lerp(1, panel.shrink, root.progress)
+                  yScale: xScale
                 }
 
-                ScreencopyView {
-                  id: copy
-                  anchors.fill: parent
-                  // Kept alive while hidden, unlike the strip thumbnails. A
-                  // context created on open delivers its first buffer 2-3
-                  // frames after the surface maps, and until then the window
-                  // is simply missing from the screen -- measured off a 60fps
-                  // capture of every open. These are only the current
-                  // desktop's windows, so a live context costs one capture on
-                  // creation and one per refresh below, nothing per frame.
-                  captureSource: win.modelData.wayland
-                  live: root.shown
-                  paintCursor: false
-                }
-
-                scale: win.isSelected && root.settled && root.showSelection ? 1.02 : 1.0
-                Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
-              }
-
-              Item {
-                id: winMask
-                anchors.fill: parent
-                layer.enabled: true
-                visible: false
+                // Hyprland's border, drawn outside the window like Hyprland does.
+                // Fades out over the shrink: in the overview windows are bare.
                 Rectangle {
                   anchors.fill: parent
-                  radius: root.decoRounding
-                  color: "black"
+                  anchors.margins: -root.decoBorder
+                  radius: root.decoRounding + root.decoBorder
+                  color: "transparent"
+                  border.width: root.decoBorder
+                  border.color: win.modelData.activated ? root.decoActive : root.decoInactive
+                  opacity: Math.max(0, 1 - root.progress * 2)
+                  visible: opacity > 0 && root.decoBorder > 0
+                  scale: shot.scale
+                }
+
+                Item {
+                  id: shot
+                  anchors.fill: parent
+
+                  // Rounded like the real window. The layer also gives the
+                  // scaled-down copy smooth filtering instead of shimmering.
+                  layer.enabled: root.decoRounding > 0
+                  layer.smooth: true
+                  layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: winMask
+                    maskThresholdMin: 0.5
+                    maskSpreadAtMin: 1.0
+                  }
+
+                  ScreencopyView {
+                    id: copy
+                    anchors.fill: parent
+                    // Kept alive while hidden, unlike the strip thumbnails. A
+                    // context created on open delivers its first buffer 2-3
+                    // frames after the surface maps, and until then the window
+                    // is simply missing from the screen -- measured off a 60fps
+                    // capture of every open. These are only the current
+                    // desktop's windows, so a live context costs one capture on
+                    // creation and one per refresh below, nothing per frame.
+                    captureSource: win.modelData.wayland
+                    live: root.shown
+                    paintCursor: false
+                  }
+
+                  scale: win.isSelected && root.settled && root.showSelection ? 1.02 : 1.0
+                  Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+                }
+
+                Item {
+                  id: winMask
+                  anchors.fill: parent
+                  layer.enabled: true
+                  visible: false
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: root.decoRounding
+                    color: "black"
+                  }
+                }
+
+                HoverHandler {
+                  id: winHover
+                  // Only once the windows have settled: during the shrink they are
+                  // sliding under a stationary pointer, so every window they pass
+                  // under would grab the selection.
+                  onHoveredChanged: if (hovered && root.settled && Math.abs(root.slide) < 0.01) {
+                    root.showSelection = true;
+                    panel.selected = win.index;
+                  }
+                }
+
+                TapHandler {
+                  onTapped: root.focusWindow(String(win.modelData.address))
                 }
               }
 
-              HoverHandler {
-                id: winHover
-                // Only once the windows have settled: during the shrink they are
-                // sliding under a stationary pointer, so every window they pass
-                // under would grab the selection.
-                onHoveredChanged: if (hovered && root.settled) {
-                  root.showSelection = true;
-                  panel.selected = win.index;
-                }
+              // Selection is a ring plus a nudge in size. No fill and no dim on
+              // the others: in the exposé the windows are the content, and
+              // dimming five of six makes the whole view look switched off.
+              // Outside the scaled body so its border is not scaled down with it.
+              Rectangle {
+                x: win.targetX
+                y: win.targetY
+                width: win.targetW
+                height: win.targetH
+                scale: shot.scale
+                radius: Math.max(4, Math.round(10 * panel.uiScale))
+                color: "transparent"
+                border.width: Math.max(2, Math.round(3 * panel.uiScale))
+                // Gone the instant a close starts: left at the overview rect while
+                // the window grows back, it was a ghost frame on every close.
+                visible: root.settled && root.showSelection
+                border.color: win.isSelected ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
+                Behavior on border.color { ColorAnimation { duration: 120 } }
               }
 
-              TapHandler {
-                onTapped: root.focusWindow(String(win.modelData.address))
+              // Icon straddling the bottom edge of the window with the title
+              // under it -- the macOS arrangement. Capped against the window so a
+              // small floating window does not get an icon wider than itself.
+              Image {
+                id: appIcon
+                width: Math.min(panel.iconSize, win.targetW * 0.4)
+                height: width
+                x: win.targetX + (win.targetW - width) / 2
+                y: win.targetY + win.targetH - height / 2
+                opacity: win.labelOpacity
+                visible: opacity > 0
+                source: root.iconFor(win.ipc ? win.ipc["class"] : "")
+                sourceSize.width: panel.iconSize
+                sourceSize.height: panel.iconSize
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                smooth: true
+              }
+
+              Text {
+                width: Math.max(win.targetW, panel.width * 0.16)
+                x: win.targetX + (win.targetW - width) / 2
+                y: appIcon.y + appIcon.height + Math.round(panel.titleSize * 0.5)
+                horizontalAlignment: Text.AlignHCenter
+                // Untrusted: see root.displayLabel.
+                textFormat: Text.PlainText
+                text: root.displayLabel(win.modelData.title || (win.ipc && win.ipc["class"]) || "")
+                font.family: root.fontFamily
+                font.pixelSize: panel.titleSize
+                color: win.isSelected ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78)
+                opacity: win.labelOpacity
+                visible: opacity > 0
+                elide: Text.ElideRight
+                maximumLineCount: 1
+                style: Text.Raised
+                styleColor: Qt.rgba(0, 0, 0, 0.6)
               }
             }
+          }
 
-            // Selection is a ring plus a nudge in size. No fill and no dim on
-            // the others: in the exposé the windows are the content, and
-            // dimming five of six makes the whole view look switched off.
-            // Outside the scaled body so its border is not scaled down with it.
-            Rectangle {
-              x: win.targetX
-              y: win.targetY
-              width: win.targetW
-              height: win.targetH
-              scale: shot.scale
-              radius: Math.max(4, Math.round(10 * panel.uiScale))
-              color: "transparent"
-              border.width: Math.max(2, Math.round(3 * panel.uiScale))
-              // Gone the instant a close starts: left at the overview rect while
-              // the window grows back, it was a ghost frame on every close.
-              visible: root.settled && root.showSelection
-              border.color: win.isSelected ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
-              Behavior on border.color { ColorAnimation { duration: 120 } }
-            }
-
-            // Icon straddling the bottom edge of the window with the title
-            // under it -- the macOS arrangement. Capped against the window so a
-            // small floating window does not get an icon wider than itself.
-            Image {
-              id: appIcon
-              width: Math.min(panel.iconSize, win.targetW * 0.4)
-              height: width
-              x: win.targetX + (win.targetW - width) / 2
-              y: win.targetY + win.targetH - height / 2
-              opacity: win.labelOpacity
-              visible: opacity > 0
-              source: root.iconFor(win.ipc ? win.ipc["class"] : "")
-              sourceSize.width: panel.iconSize
-              sourceSize.height: panel.iconSize
-              fillMode: Image.PreserveAspectFit
-              asynchronous: true
-              smooth: true
-            }
-
-            Text {
-              width: Math.max(win.targetW, panel.width * 0.16)
-              x: win.targetX + (win.targetW - width) / 2
-              y: appIcon.y + appIcon.height + Math.round(panel.titleSize * 0.5)
-              horizontalAlignment: Text.AlignHCenter
-              // Untrusted: see root.displayLabel.
-              textFormat: Text.PlainText
-              text: root.displayLabel(win.modelData.title || (win.ipc && win.ipc["class"]) || "")
-              font.family: root.fontFamily
-              font.pixelSize: panel.titleSize
-              color: win.isSelected ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78)
-              opacity: win.labelOpacity
-              visible: opacity > 0
-              elide: Text.ElideRight
-              maximumLineCount: 1
-              style: Text.Raised
-              styleColor: Qt.rgba(0, 0, 0, 0.6)
-            }
+          // An empty desktop says so, rather than leaving a blank half-screen
+          // that looks like something failed to load.
+          Text {
+            visible: panel.windows.length === 0
+            opacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: panel.exposeAreaY + panel.exposeAreaH * 0.42
+            textFormat: Text.PlainText
+            text: "No windows"
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(22 * panel.uiScale)
+            color: Qt.rgba(1, 1, 1, 0.35)
           }
         }
 
-        // An empty desktop says so, rather than leaving a blank half-screen
-        // that looks like something failed to load.
-        Text {
-          visible: panel.windows.length === 0
-          opacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
-          anchors.horizontalCenter: parent.horizontalCenter
-          y: panel.exposeAreaY + panel.exposeAreaH * 0.42
-          textFormat: Text.PlainText
-          text: "No windows"
-          font.family: root.fontFamily
-          font.pixelSize: Math.round(22 * panel.uiScale)
-          color: Qt.rgba(1, 1, 1, 0.35)
+        // --- neighbouring desktops, for the sideways swipe ------------------
+        // The overview layout only, no interaction: they are just passing
+        // through. Instantiated all the while the overview is up, so their
+        // captures already have frames when a swipe brings them into view.
+        Repeater {
+          model: panel.slideOwner ? [-1, 1] : []
+
+          delegate: Item {
+            id: page
+            required property int modelData
+            readonly property var desk: panel.desktopAt(page.modelData)
+            x: (page.modelData + root.slide) * panel.width
+            width: panel.width
+            height: panel.height
+            visible: page.desk !== null && Math.abs(page.modelData + root.slide) < 1
+            opacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
+
+            property var wins: []
+            readonly property var winsLive: panel.windowsOf(page.desk)
+            onWinsLiveChanged: if (!root.sameList(page.wins, page.winsLive)) page.wins = page.winsLive
+            Component.onCompleted: page.wins = page.winsLive
+            readonly property var origin: panel.originFor(page.wins)
+
+            Repeater {
+              model: page.wins
+
+              delegate: Item {
+                id: other
+                required property var modelData
+                readonly property var ipc: modelData.lastIpcObject
+                readonly property var at: (ipc && ipc.at) ? ipc.at : [0, 0]
+                readonly property var size: (ipc && ipc.size) ? ipc.size : [0, 0]
+                readonly property real w: other.size[0] * panel.shrink
+                readonly property real h: other.size[1] * panel.shrink
+                x: page.origin.x + (other.at[0] - panel.monX) * panel.shrink
+                y: page.origin.y + (other.at[1] - panel.monY) * panel.shrink
+                width: other.w
+                height: other.h
+
+                Item {
+                  anchors.fill: parent
+                  layer.enabled: root.decoRounding > 0
+                  layer.smooth: true
+                  layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: otherMask
+                    maskThresholdMin: 0.5
+                    maskSpreadAtMin: 1.0
+                  }
+                  ScreencopyView {
+                    anchors.fill: parent
+                    // Same rules as the strip thumbnails: no source while
+                    // hidden, live only once the overview has settled.
+                    captureSource: root.shown ? other.modelData.wayland : null
+                    live: root.shown && root.settled
+                    paintCursor: false
+                  }
+                }
+
+                Item {
+                  id: otherMask
+                  anchors.fill: parent
+                  layer.enabled: true
+                  visible: false
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: root.decoRounding * panel.shrink
+                    color: "black"
+                  }
+                }
+
+                Image {
+                  id: otherIcon
+                  width: Math.min(panel.iconSize, other.w * 0.4)
+                  height: width
+                  x: (other.w - width) / 2
+                  y: other.h - height / 2
+                  source: root.iconFor(other.ipc ? other.ipc["class"] : "")
+                  sourceSize.width: panel.iconSize
+                  sourceSize.height: panel.iconSize
+                  fillMode: Image.PreserveAspectFit
+                  asynchronous: true
+                  smooth: true
+                }
+
+                Text {
+                  width: Math.max(other.w, panel.width * 0.16)
+                  x: (other.w - width) / 2
+                  y: otherIcon.y + otherIcon.height + Math.round(panel.titleSize * 0.5)
+                  horizontalAlignment: Text.AlignHCenter
+                  // Untrusted: see root.displayLabel.
+                  textFormat: Text.PlainText
+                  text: root.displayLabel(other.modelData.title || (other.ipc && other.ipc["class"]) || "")
+                  font.family: root.fontFamily
+                  font.pixelSize: panel.titleSize
+                  color: Qt.rgba(1, 1, 1, 0.78)
+                  elide: Text.ElideRight
+                  maximumLineCount: 1
+                  style: Text.Raised
+                  styleColor: Qt.rgba(0, 0, 0, 0.6)
+                }
+              }
+            }
+
+            Text {
+              visible: page.wins.length === 0
+              anchors.horizontalCenter: parent.horizontalCenter
+              y: panel.exposeAreaY + panel.exposeAreaH * 0.42
+              textFormat: Text.PlainText
+              text: "No windows"
+              font.family: root.fontFamily
+              font.pixelSize: Math.round(22 * panel.uiScale)
+              color: Qt.rgba(1, 1, 1, 0.35)
+            }
+          }
         }
       }
     }

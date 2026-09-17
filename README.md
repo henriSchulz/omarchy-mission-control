@@ -43,7 +43,12 @@ For the legacy (non-Lua) Hyprland config format, see [`install/bindings.conf`](i
 Touchpad gestures are optional and live in [`install/gestures.lua`](install/gestures.lua).
 The overview tracks a four-finger vertical swipe live: the windows shrink as your
 fingers move, and on release it settles open or closed by distance and speed.
+A four-finger sideways swipe inside the overview slides between desktops, the
+next one coming in beside the current one; outside it stays Hyprland's normal
+workspace swipe.
 Needs Hyprland 0.56+ (gesture callback tables). Log out and back in after adding it.
+Edits to the plugin need `omarchy restart shell`: the shell's hot reload does not
+re-create this always-loaded overlay.
 
 For a smooth open, also turn off Hyprland's own layer fade for this surface:
 
