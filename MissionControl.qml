@@ -275,13 +275,19 @@ Item {
     root.progress = 0;
   }
 
-  readonly property int shrinkDuration: 240
-  readonly property int fadeDuration: 90
+  readonly property int shrinkDuration: 400
+  readonly property int fadeDuration: 120
+  // Soft start, long gentle settle (cubic-bezier 0.2, 0, 0, 1). OutQuart moved
+  // the windows 18% of the way in the first 5% of the time, which read as a
+  // jolt; this eases in over the first frames and glides home.
+  readonly property var shrinkCurve: [0.2, 0, 0, 1, 1, 1]
+  // Share of the duration after which the curve is ~98.5% home -- where the
+  // closing crossfade starts.
+  readonly property real fadeStartAt: 0.8
 
   // One animated number drives the whole shrink, 0 = real desktop, 1 = overview.
   // Every window, the strip and the labels derive from it, so they cannot drift
-  // apart the way four independent Behaviors per window did. OutQuart front-loads
-  // the movement, which reads as responsive without the hard stop of OutCubic.
+  // apart the way four independent Behaviors per window did. See shrinkCurve.
   //
   // Not a binding: during a touchpad swipe it is set directly from the fingers,
   // and otherwise animated from wherever it currently is -- so a swipe can grab
@@ -308,7 +314,7 @@ Item {
       return;
     }
     let dur = Math.round(root.shrinkDuration * Math.sqrt(Math.min(1, dist)));
-    let easing = Easing.OutQuart;
+    let easing = Easing.BezierSpline;
     if (root.releasing) {
       easing = Easing.OutCubic;
       const speed = Math.abs(root.trackVelocity);
@@ -317,8 +323,10 @@ Item {
     }
     progressAnim.from = root.progress;
     progressAnim.to = to;
-    progressAnim.duration = Math.max(90, Math.min(root.shrinkDuration, dur));
+    progressAnim.duration = Math.max(180, Math.min(root.shrinkDuration, dur));
     progressAnim.easing.type = easing;
+    if (easing === Easing.BezierSpline)
+      progressAnim.easing.bezierCurve = root.shrinkCurve;
     progressAnim.start();
   }
 
@@ -520,11 +528,12 @@ Item {
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
       const dur = progressAnim.running ? progressAnim.duration : 0;
-      // OutQuart is ~99% home at 70%: the copy is then indistinguishable from
-      // the desktop, so a short fade over the tail hands over without the
-      // full-size copy lingering on screen.
-      fadeOutSoon.interval = Math.round(dur * 0.7);
-      collapseThenHide.interval = Math.max(dur, Math.round(dur * 0.7) + root.fadeDuration) + 16;
+      // The curve is ~98.5% home at fadeStartAt: the copy is then
+      // indistinguishable from the desktop, so a short fade over the tail hands
+      // over without the full-size copy lingering on screen.
+      const fadeAt = Math.round(dur * root.fadeStartAt);
+      fadeOutSoon.interval = fadeAt;
+      collapseThenHide.interval = Math.max(dur, fadeAt + root.fadeDuration) + 16;
       fadeOutSoon.restart();
       collapseThenHide.restart();
     }
@@ -606,14 +615,14 @@ Item {
   // over the tail of the movement rather than after it.
   Timer {
     id: fadeOutSoon
-    // Set on each close; OutQuart is ~95% home at 55% of the duration.
-    interval: Math.round(root.shrinkDuration * 0.55)
+    // Set on each close.
+    interval: Math.round(root.shrinkDuration * root.fadeStartAt)
     onTriggered: if (!root.opened && !root.tracking) root.contentVisible = false
   }
 
   Timer {
     id: collapseThenHide
-    interval: Math.max(root.shrinkDuration, Math.round(root.shrinkDuration * 0.55) + root.fadeDuration)
+    interval: Math.max(root.shrinkDuration, Math.round(root.shrinkDuration * root.fadeStartAt) + root.fadeDuration)
     onTriggered: if (!root.opened && !root.tracking) root.shown = false
   }
 
