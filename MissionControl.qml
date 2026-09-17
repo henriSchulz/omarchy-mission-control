@@ -272,6 +272,9 @@ Item {
       return;
     root.stripHold = false;
     progressAnim.stop();
+    progressSpring.stop();
+    root.springVelocity = 0;
+    root.progressAnimDuration = 0;
     root.progress = 0;
   }
 
@@ -306,28 +309,94 @@ Item {
   // After a swipe the release speed is matched: OutCubic starts at three times
   // its average speed, so 3 * distance / velocity continues the finger motion
   // without a visible kink.
+  // How long the animation just started will take, for the close timers.
+  property int progressAnimDuration: 0
+
   function animateProgress(to) {
     progressAnim.stop();
     const dist = Math.abs(to - root.progress);
-    if (dist < 0.001) {
+    if (dist < 0.001 && !progressSpring.running) {
       root.progress = to;
+      root.progressAnimDuration = 0;
       return;
     }
-    let dur = Math.round(root.shrinkDuration * Math.sqrt(Math.min(1, dist)));
-    let easing = Easing.BezierSpline;
-    if (root.releasing) {
-      easing = Easing.OutCubic;
-      const speed = Math.abs(root.trackVelocity);
-      if (speed > 0.0005)
-        dur = Math.min(dur, Math.round(3 * dist / speed));
+    // A released swipe keeps moving on the spring that followed the fingers,
+    // so position and speed carry over without a kink.
+    if (root.releasing || progressSpring.running) {
+      root.springTarget = to;
+      // Critically damped: an initial speed towards the target above
+      // omega * distance would overshoot, i.e. the windows would briefly grow
+      // past full size or shrink past the overview. Cap it there.
+      const toward = (to - root.progress) * root.springVelocity;
+      const cap = root.springOmegaRelease * dist;
+      if (toward > 0 && Math.abs(root.springVelocity) > cap)
+        root.springVelocity = Math.sign(root.springVelocity) * cap;
+      root.springOmega = root.springOmegaRelease;
+      progressSpring.start();
+      root.progressAnimDuration = root.springSettleTime();
+      return;
     }
+    const dur = Math.round(root.shrinkDuration * Math.sqrt(Math.min(1, dist)));
     progressAnim.from = root.progress;
     progressAnim.to = to;
     progressAnim.duration = Math.max(180, Math.min(root.shrinkDuration, dur));
-    progressAnim.easing.type = easing;
-    if (easing === Easing.BezierSpline)
-      progressAnim.easing.bezierCurve = root.shrinkCurve;
+    progressAnim.easing.type = Easing.BezierSpline;
+    progressAnim.easing.bezierCurve = root.shrinkCurve;
+    root.progressAnimDuration = progressAnim.duration;
     progressAnim.start();
+  }
+
+  // --- finger follower ------------------------------------------------------
+  // Setting `progress` straight from the touchpad made every fast or coarse
+  // update a visible jump. The fingers now only move `springTarget`; a
+  // critically damped spring pulls `progress` towards it every frame. Slow
+  // swipes feel attached, fast ones are smoothed into a glide, and position and
+  // velocity stay continuous through the release.
+  property real springTarget: 0
+  property real springVelocity: 0 // progress per second
+  property real springOmega: root.springOmegaTracking
+  // Lag behind the fingers is about 2 / omega: ~70ms while tracking.
+  readonly property real springOmegaTracking: 28
+  // Settles (1.5%) in ~5.2 / omega: ~350ms after release.
+  readonly property real springOmegaRelease: 15
+
+  FrameAnimation {
+    id: progressSpring
+    onTriggered: root.stepSpring(Math.min(frameTime, 1 / 30))
+  }
+
+  function stepSpring(dt) {
+    // Semi-implicit Euler in sub-steps; stable for these stiffnesses.
+    const steps = Math.max(1, Math.ceil(dt / 0.004));
+    const h = dt / steps;
+    const w = root.springOmega;
+    let x = root.progress;
+    let v = root.springVelocity;
+    for (let i = 0; i < steps; i++) {
+      v += (w * w * (root.springTarget - x) - 2 * w * v) * h;
+      x += v * h;
+    }
+    if (!root.tracking && Math.abs(root.springTarget - x) < 0.001 && Math.abs(v) < 0.01) {
+      x = root.springTarget;
+      v = 0;
+      progressSpring.stop();
+    }
+    root.springVelocity = v;
+    root.progress = x;
+  }
+
+  // Milliseconds until the release spring is within 1.5% of its target.
+  function springSettleTime() {
+    const w = root.springOmegaRelease;
+    let x = root.progress - root.springTarget;
+    let v = root.springVelocity;
+    let t = 0;
+    while (t < 1.5 && (Math.abs(x) > 0.015 || Math.abs(v) > 0.2)) {
+      v += (-w * w * x - 2 * w * v) * 0.004;
+      x += v * 0.004;
+      t += 0.004;
+    }
+    return Math.round(t * 1000);
   }
 
   // --- touchpad swipe -------------------------------------------------------
@@ -379,13 +448,17 @@ Item {
   function handleGesture(phase, value, time) {
     if (phase === "start") {
       progressAnim.stop();
+      if (!progressSpring.running)
+        root.springVelocity = 0;
+      root.springTarget = root.progress;
+      root.springOmega = root.springOmegaTracking;
       collapseThenHide.stop();
       fadeOutSoon.stop();
       expandFallback.stop();
       root.tracking = true;
       trackWatchdog.restart();
       root.stripHold = false;
-      root.trackStart = Math.max(0, Math.min(1, root.progress));
+      root.trackStart = Math.max(0, Math.min(1, root.springTarget));
       root.trackTravel = 0;
       root.trackVelocity = 0;
       root.trackLastTime = time;
@@ -416,16 +489,18 @@ Item {
       }
       const raw = root.trackStart + root.trackTravel;
       // Past fully open: resist, a little, like a rubber band.
-      root.progress = raw <= 0 ? 0
+      root.springTarget = raw <= 0 ? 0
           : raw <= 1 ? raw
           : 1 + 0.06 * (1 - 1 / (1 + (raw - 1) * 3));
+      if (!progressSpring.running)
+        progressSpring.start();
     } else if (phase === "end" && root.tracking) {
       root.tracking = false;
       trackWatchdog.stop();
       // Fingers held still before lifting: no fling.
       if (time - root.trackLastTime > 80 || value === 1)
         root.trackVelocity = 0;
-      let open = root.progress + root.trackVelocity * 120 > 0.4;
+      let open = root.springTarget + root.trackVelocity * 120 > 0.4;
       if (Math.abs(root.trackVelocity) > 0.002)
         open = root.trackVelocity > 0;
       root.releasing = true;
@@ -527,7 +602,7 @@ Item {
       expandFallback.stop();
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
-      const dur = progressAnim.running ? progressAnim.duration : 0;
+      const dur = (progressAnim.running || progressSpring.running) ? root.progressAnimDuration : 0;
       // The curve is ~98.5% home at fadeStartAt: the copy is then
       // indistinguishable from the desktop, so a short fade over the tail hands
       // over without the full-size copy lingering on screen.
