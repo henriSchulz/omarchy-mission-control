@@ -1,0 +1,89 @@
+/* Henri UI motion tokens — Web / Tauri / Electron.
+ * Single source of truth: load this file at runtime from
+ * ~/.local/share/henri-ui/motion.css (Tauri/Electron) instead of copying it,
+ * so edits here reach every app. Use the variables; never hand-pick
+ * durations or curves. Values mirror SKILL.md.
+ * Spring curves are exact solutions of a mass-1 spring (see SKILL.md table),
+ * sampled into linear(); pair each with its -dur. */
+:root {
+  --dur-instant: 90ms;
+  --dur-fast: 160ms;
+  --dur-base: 240ms;
+  --dur-slow: 380ms;
+  --dur-slower: 520ms;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.15, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 0.7, 0.2);
+
+  --spring-smooth: linear(0, 0.023, 0.079, 0.153, 0.236, 0.32, 0.403, 0.48, 0.551, 0.614, 0.671, 0.72, 0.763, 0.801, 0.833, 0.86, 0.883, 0.903, 0.919, 0.933, 0.944, 0.954, 0.962, 0.969, 0.974, 0.979, 0.983, 0.986, 0.988, 0.99, 0.992, 0.994, 0.995, 0.996, 0.997, 0.997, 0.998, 0.998, 0.998, 0.999, 1);
+  --spring-smooth-dur: 510ms;
+  --spring-snappy: linear(0, 0.021, 0.075, 0.148, 0.233, 0.322, 0.41, 0.495, 0.573, 0.644, 0.707, 0.762, 0.81, 0.85, 0.884, 0.912, 0.934, 0.953, 0.967, 0.979, 0.987, 0.994, 0.998, 1.002, 1.004, 1.005, 1.006, 1.006, 1.006, 1.006, 1.005, 1.005, 1.004, 1.004, 1.003, 1.003, 1.002, 1.002, 1.002, 1.001, 1);
+  --spring-snappy-dur: 560ms;
+  --spring-gentle: linear(0, 0.023, 0.079, 0.153, 0.236, 0.321, 0.403, 0.48, 0.551, 0.614, 0.671, 0.72, 0.764, 0.801, 0.833, 0.86, 0.883, 0.903, 0.919, 0.933, 0.944, 0.954, 0.962, 0.969, 0.974, 0.979, 0.983, 0.986, 0.988, 0.99, 0.992, 0.994, 0.995, 0.996, 0.997, 0.997, 0.998, 0.998, 0.998, 0.999, 1);
+  --spring-gentle-dur: 730ms;
+  --spring-bouncy: linear(0, 0.018, 0.065, 0.132, 0.212, 0.298, 0.386, 0.472, 0.554, 0.63, 0.699, 0.761, 0.815, 0.861, 0.9, 0.933, 0.959, 0.98, 0.996, 1.008, 1.017, 1.023, 1.026, 1.028, 1.028, 1.028, 1.026, 1.024, 1.022, 1.019, 1.017, 1.014, 1.012, 1.01, 1.008, 1.006, 1.005, 1.004, 1.003, 1.002, 1);
+  --spring-bouncy-dur: 570ms;
+
+  --radius-panel: 14px;
+  --radius-popover: 10px;
+  --radius-control: 8px;
+  --radius-row: 6px;
+  --radius-chip: 5px;
+
+  --press-scale: 0.97;
+  --flash-duration: 70ms;
+  --stagger-step: 15ms;
+
+  /* Size (Apple HIG, desktop) */
+  --control-height: 28px;
+  --control-min: 20px;
+  --menu-item-height: 26px;
+  --focus-ring: 2px;
+  --hover-alpha: 8%;
+  --pressed-alpha: 14%;
+  --hairline: 1px solid color-mix(in srgb, var(--fg, currentColor) 10%, transparent);
+  --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.2), 0 0 0 0.5px rgb(0 0 0 / 0.12);
+}
+
+/* Interactive controls: hover in fast, out slower, press springs back. */
+.ui-control {
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--spring-snappy-dur) var(--spring-snappy);
+}
+.ui-control:hover { transition-duration: var(--dur-instant), var(--dur-instant), var(--dur-instant), var(--spring-snappy-dur); }
+.ui-control:active { transform: scale(var(--press-scale)); transition-duration: var(--dur-instant); }
+
+/* Menus / popovers: toggle [data-open]; element stays mounted so closing can animate. */
+.ui-menu {
+  transform-origin: var(--origin, top center);
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
+  visibility: hidden;
+  transition:
+    opacity calc(var(--dur-base) * 0.7) var(--ease-exit),
+    transform calc(var(--dur-base) * 0.7) var(--ease-exit),
+    visibility 0s linear calc(var(--dur-base) * 0.7);
+}
+.ui-menu[data-open] {
+  opacity: 1;
+  transform: none;
+  visibility: visible;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--spring-smooth-dur) var(--spring-smooth),
+    visibility 0s;
+}
+/* Popover = class="ui-menu ui-popover": starts a bit smaller, settles gentler. */
+.ui-popover:not([data-open]) { transform: scale(0.95); }
+.ui-popover[data-open] { transition-duration: var(--dur-slow), var(--spring-gentle-dur), 0s; transition-timing-function: var(--ease-out), var(--spring-gentle), linear; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-property: opacity, background-color, color, border-color !important;
+    animation: none !important;
+  }
+}

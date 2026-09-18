@@ -1,0 +1,4 @@
+Vendored copy of henri-ui (Henri's shared UI components and motion tokens).
+Source of truth: ~/.local/share/henri-ui (dotfiles: stow/henri-ui). Do not edit
+here — henri-ui-sync mirrors the source into this folder on every change.
+Shipped inside this repo so the plugin also works for people without henri-ui.

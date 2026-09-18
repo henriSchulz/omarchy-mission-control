@@ -36,6 +36,9 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
+// henri-ui ships inside this repo (henri-ui/, mirrored from Henri's central copy)
+// so the public plugin works without anyone's home folder. Imported relatively.
+import "henri-ui/Motion.js" as Motion
 
 Item {
   id: root
@@ -238,7 +241,8 @@ Item {
     property: "contentOpacity"
     to: 0
     duration: root.fadeDuration
-    easing.type: Easing.InQuad
+    easing.type: Easing.BezierSpline
+    easing.bezierCurve: Motion.easeExit
   }
   onContentVisibleChanged: {
     if (root.contentVisible) {
@@ -280,15 +284,25 @@ Item {
     root.progress = 0;
   }
 
-  readonly property int shrinkDuration: 400
-  readonly property int fadeDuration: 120
-  // Soft start, long gentle settle (cubic-bezier 0.2, 0, 0, 1). OutQuart moved
-  // the windows 18% of the way in the first 5% of the time, which read as a
-  // jolt; this eases in over the first frames and glides home.
-  readonly property var shrinkCurve: [0.2, 0, 0, 1, 1, 1]
-  // Share of the duration after which the curve is ~98.5% home -- where the
+  // henri-ui full-screen tokens: the open (keyboard, click, backstop) runs
+  // Motion.slower, the close the exit share of it -- leaving is faster than
+  // arriving. Both follow Motion.speed.
+  readonly property int shrinkDuration: Motion.slower
+  readonly property int unshrinkDuration: Motion.exit(Motion.slower)
+  // Shortest animation, for finishing a nearly-done shrink.
+  readonly property int shrinkMinDuration: Motion.fast
+  // The closing crossfade over the tail: a short exit fade.
+  readonly property int fadeDuration: Motion.exit(Motion.fast)
+  // Soft start, long gentle settle: henri-ui's easeInOut (the windows move from
+  // A to B, both ways). OutQuart moved the windows 18% of the way in the first
+  // 5% of the time, which read as a jolt; this eases in over the first frames
+  // and glides home. Deliberately not easeExit on the close: that curve ends at
+  // full speed, and the windows would slam into their real rects right where
+  // the copy has to be indistinguishable from the desktop.
+  readonly property var shrinkCurve: Motion.easeInOut
+  // Share of the duration after which the curve is ~98.8% home -- where the
   // closing crossfade starts.
-  readonly property real fadeStartAt: 0.8
+  readonly property real fadeStartAt: 0.85
 
   // One animated number drives the whole shrink, 0 = real desktop, 1 = overview.
   // Every window, the strip and the labels derive from it, so they cannot drift
@@ -338,10 +352,11 @@ Item {
       root.progressAnimDuration = root.springSettleTime();
       return;
     }
-    const dur = Math.round(root.shrinkDuration * Math.sqrt(Math.min(1, dist)));
+    const full = to > root.progress ? root.shrinkDuration : root.unshrinkDuration;
+    const dur = Math.round(full * Math.sqrt(Math.min(1, dist)));
     progressAnim.from = root.progress;
     progressAnim.to = to;
-    progressAnim.duration = Math.max(180, Math.min(root.shrinkDuration, dur));
+    progressAnim.duration = Math.max(root.shrinkMinDuration, Math.min(full, dur));
     progressAnim.easing.type = Easing.BezierSpline;
     progressAnim.easing.bezierCurve = root.shrinkCurve;
     root.progressAnimDuration = progressAnim.duration;
@@ -358,9 +373,15 @@ Item {
   property real springVelocity: 0 // progress per second
   property real springOmega: root.springOmegaTracking
   // Lag behind the fingers is about 2 / omega: ~70ms while tracking.
+  // Deliberately a literal, not a henri-ui preset: this is not an animation
+  // but the low-pass filter that keeps the windows attached to the fingers.
+  // Tying it to Motion.speed would make direct manipulation feel laggy.
   readonly property real springOmegaTracking: 28
-  // Settles (1.5%) in ~5.2 / omega: ~350ms after release.
-  readonly property real springOmegaRelease: 15
+  // The release is an animation, so it is henri-ui's `gentle` spring (big
+  // surfaces, no overshoot): omega = 2 pi / response, which also keeps it in
+  // step with Motion.speed. Critically damped like before; settles (1.5%) in
+  // ~5.2 / omega: ~410ms after release at speed 1.
+  readonly property real springOmegaRelease: 2 * Math.PI / Motion.gentle.response
 
   FrameAnimation {
     id: progressSpring
@@ -771,7 +792,7 @@ Item {
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
       const dur = (progressAnim.running || progressSpring.running) ? root.progressAnimDuration : 0;
-      // The curve is ~98.5% home at fadeStartAt: the copy is then
+      // The curve is ~98.8% home at fadeStartAt: the copy is then
       // indistinguishable from the desktop, so a short fade over the tail hands
       // over without the full-size copy lingering on screen.
       const fadeAt = Math.round(dur * root.fadeStartAt);
@@ -859,13 +880,13 @@ Item {
   Timer {
     id: fadeOutSoon
     // Set on each close.
-    interval: Math.round(root.shrinkDuration * root.fadeStartAt)
+    interval: Math.round(root.unshrinkDuration * root.fadeStartAt)
     onTriggered: if (!root.opened && !root.tracking) root.contentVisible = false
   }
 
   Timer {
     id: collapseThenHide
-    interval: Math.max(root.shrinkDuration, Math.round(root.shrinkDuration * root.fadeStartAt) + root.fadeDuration)
+    interval: Math.max(root.unshrinkDuration, Math.round(root.unshrinkDuration * root.fadeStartAt) + root.fadeDuration)
     onTriggered: if (!root.opened && !root.tracking) root.shown = false
   }
 
@@ -1270,6 +1291,15 @@ Item {
       readonly property int iconSize: Math.max(18, Math.round(panel.width * 0.023))
       readonly property int titleSize: Math.max(10, Math.round(panel.width * 0.0085))
 
+      // Everything here sits on the (dimmed) wallpaper, not on a theme surface,
+      // so the ink is white like macOS Mission Control -- in every theme. The
+      // theme foreground (dark in cupertino) would vanish against it.
+      readonly property color overlayInk: "#ffffff"
+
+      // Desktop thumbnails: henri-ui's control radius, scaled with the rest of
+      // the overview geometry (which follows the screen, not the font).
+      readonly property real thumbRadius: Style.space(Motion.radiusControl * panel.uiScale)
+
       // --- selection --------------------------------------------------------
       // Index into panel.windows; -1 when the desktop is empty.
       property int selected: panel.windows.length > 0 ? 0 : -1
@@ -1505,7 +1535,7 @@ Item {
           Rectangle {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: 1
-            color: Qt.rgba(1, 1, 1, 0.12)
+            color: Util.alpha(panel.overlayInk, Motion.hairlineAlpha)
           }
 
           Row {
@@ -1634,7 +1664,12 @@ Item {
                       anchors.fill: parent
                       color: "#05060a"
                       opacity: deskCell.modelData.focused ? 0.0 : (deskHover.hovered ? 0.10 : 0.28)
-                      Behavior on opacity { NumberAnimation { duration: 140 } }
+                      Behavior on opacity {
+                        NumberAnimation {
+                          duration: deskHover.hovered ? Motion.instant : Motion.fast
+                          easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                        }
+                      }
                     }
                   }
 
@@ -1645,7 +1680,7 @@ Item {
                     visible: false
                     Rectangle {
                       anchors.fill: parent
-                      radius: Math.max(4, Math.round(8 * panel.uiScale))
+                      radius: panel.thumbRadius
                       color: "black"
                     }
                   }
@@ -1655,20 +1690,30 @@ Item {
                   // would read as a second meaning.
                   Rectangle {
                     anchors.fill: parent
-                    radius: Math.max(4, Math.round(8 * panel.uiScale))
-                    color: "transparent"
+                    radius: panel.thumbRadius
+                    color: Util.alpha(panel.overlayInk, 0)
                     border.width: Math.max(1, Math.round(2 * panel.uiScale))
-                    border.color: deskCell.modelData.focused ? Qt.rgba(1, 1, 1, 0.96)
-                                : deskHover.hovered ? Qt.rgba(1, 1, 1, 0.55)
-                                : Qt.rgba(1, 1, 1, 0.16)
-                    Behavior on border.color { ColorAnimation { duration: 120 } }
+                    border.color: deskCell.modelData.focused ? Util.alpha(panel.overlayInk, 0.96)
+                                : deskHover.hovered ? Util.alpha(panel.overlayInk, 0.55)
+                                : Util.alpha(panel.overlayInk, 0.16)
+                    Behavior on border.color {
+                      ColorAnimation {
+                        duration: deskHover.hovered ? Motion.instant : Motion.fast
+                        easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                      }
+                    }
                   }
 
                   HoverHandler { id: deskHover }
                   TapHandler { onTapped: root.goToWorkspace(deskCell.modelData.id) }
 
                   scale: deskHover.hovered ? 1.03 : 1.0
-                  Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+                  Behavior on scale {
+                    NumberAnimation {
+                      duration: deskHover.hovered ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
                 }
 
                 Text {
@@ -1686,7 +1731,14 @@ Item {
                   // once they are scaled up.
                   font.family: root.fontFamily
                   font.pixelSize: panel.stripLabelSize
-                  color: deskCell.modelData.focused ? "#ffffff" : Qt.rgba(1, 1, 1, 0.62)
+                  color: deskCell.modelData.focused ? panel.overlayInk
+                                                    : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
+                  Behavior on color {
+                    ColorAnimation {
+                      duration: deskCell.modelData.focused ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
                   style: Text.Raised
                   styleColor: Qt.rgba(0, 0, 0, 0.55)
                 }
@@ -1816,7 +1868,12 @@ Item {
                   }
 
                   scale: win.isSelected && root.settled && root.showSelection ? 1.02 : 1.0
-                  Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+                  Behavior on scale {
+                    NumberAnimation {
+                      duration: win.isSelected ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
                 }
 
                 Item {
@@ -1857,14 +1914,19 @@ Item {
                 width: win.targetW
                 height: win.targetH
                 scale: shot.scale
-                radius: Math.max(4, Math.round(10 * panel.uiScale))
-                color: "transparent"
+                radius: Style.space(Motion.radiusPopover * panel.uiScale)
+                color: Util.alpha(panel.overlayInk, 0)
                 border.width: Math.max(2, Math.round(3 * panel.uiScale))
                 // Gone the instant a close starts: left at the overview rect while
                 // the window grows back, it was a ghost frame on every close.
                 visible: root.settled && root.showSelection
-                border.color: win.isSelected ? Qt.rgba(1, 1, 1, 0.92) : "transparent"
-                Behavior on border.color { ColorAnimation { duration: 120 } }
+                border.color: Util.alpha(panel.overlayInk, win.isSelected ? 0.92 : 0)
+                Behavior on border.color {
+                  ColorAnimation {
+                    duration: win.isSelected ? Motion.instant : Motion.fast
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                  }
+                }
               }
 
               // Icon straddling the bottom edge of the window with the title
@@ -1896,7 +1958,14 @@ Item {
                 text: root.displayLabel(win.modelData.title || (win.ipc && win.ipc["class"]) || "")
                 font.family: root.fontFamily
                 font.pixelSize: panel.titleSize
-                color: win.isSelected ? "#ffffff" : Qt.rgba(1, 1, 1, 0.78)
+                color: win.isSelected ? panel.overlayInk
+                                      : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
+                Behavior on color {
+                  ColorAnimation {
+                    duration: win.isSelected ? Motion.instant : Motion.fast
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                  }
+                }
                 opacity: win.labelOpacity
                 visible: opacity > 0
                 elide: Text.ElideRight
@@ -1918,7 +1987,7 @@ Item {
             text: "No windows"
             font.family: root.fontFamily
             font.pixelSize: Math.round(22 * panel.uiScale)
-            color: Qt.rgba(1, 1, 1, 0.35)
+            color: Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
           }
         }
 
@@ -2017,7 +2086,7 @@ Item {
                   text: root.displayLabel(other.modelData.title || (other.ipc && other.ipc["class"]) || "")
                   font.family: root.fontFamily
                   font.pixelSize: panel.titleSize
-                  color: Qt.rgba(1, 1, 1, 0.78)
+                  color: Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
                   elide: Text.ElideRight
                   maximumLineCount: 1
                   style: Text.Raised
@@ -2034,7 +2103,7 @@ Item {
               text: "No windows"
               font.family: root.fontFamily
               font.pixelSize: Math.round(22 * panel.uiScale)
-              color: Qt.rgba(1, 1, 1, 0.35)
+              color: Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
             }
           }
         }
