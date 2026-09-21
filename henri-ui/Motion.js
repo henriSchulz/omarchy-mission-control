@@ -36,9 +36,13 @@ var bouncy = spring(0.45, 0.75)   // rare, playful only
 
 // ── Choreography ───────────────────────────────────────────────────────────
 var pressScale = 0.97
+// A dragged item (reorderable tile, Spaces thumbnail) lifts to this scale while
+// held and settles back on drop with the snappy spring.
+var liftScale = 1.05
 var menuFromScale = 0.96
 var popoverFromScale = 0.95
 var exitToScale = 0.98
+var iconFromScale = 0.8     // icon/glyph/dot crossfade: scales up from this
 var menuOffsetY = -4          // menus drop 4 px out of their anchor
 var toastOffset = 16          // toasts slide in from the screen edge
 var pageParallax = 0.3        // outgoing page moves 30 % while the new one slides in
@@ -46,7 +50,21 @@ var flashDuration = ms(70)    // menu item blink after a click (macOS)
 // Reveal waits for its window's first frame before animating; give up after this.
 var firstFrameTimeout = 400
 var tooltipDelay = 500
+// Expensive work (spawning processes, scanning directories, building large
+// models) waits this long after a surface opens, so no fork lands in the first
+// frames of its animation.
+var settleDelay = ms(120)
+// Super+Tab switcher: the strip only appears once Super+Tab is held this long,
+// a quick tap switches without flashing it (Cmd+Tab / Alt+Tab behaviour).
+var switcherDelay = 50
+// On commit the strip drifts this far in the direction the workspaces slide,
+// so the overlay and the desktop read as one movement.
+var carryOffset = 24
 var tooltipGrace = 1000       // follow-up tooltips show instantly within this window
+// Rejected input (wrong password): one horizontal shake, 3 swings — the only
+// allowed wobble, like the macOS login field.
+var shakeDistance = 6
+var shakeDuration = ms(300)
 
 var staggerStep = 15
 var staggerMax = 10

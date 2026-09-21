@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "henri.missioncontrol",
   "name": "Mission Control",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Henri Schulz (based on Andy Wei's Mission Control)",
   "description": "macOS-style workspace overview with a finger-following touchpad swipe: live desktop thumbnails across the top, the current desktop's windows shrunk out beneath",
   "kinds": [

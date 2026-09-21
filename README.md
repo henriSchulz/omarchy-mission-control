@@ -86,6 +86,11 @@ thing it asks you to change, and you make that change yourself.
 Clicking a desktop thumbnail switches to it and closes. Clicking a window
 focuses it and closes.
 
+Drag a desktop thumbnail along the strip to reorder the desktops; the others
+slide aside to make room. The numbers stay in place and the windows move, so
+`SUPER`+`n` follows the new order, and you stay on the desktop you were on.
+Needs the Lua config (all moves go to Hyprland as one Lua call).
+
 ## Requirements
 
 Nothing to install — everything it uses ships with Omarchy.

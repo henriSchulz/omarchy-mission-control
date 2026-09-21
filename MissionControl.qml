@@ -39,6 +39,7 @@ import qs.Commons
 // henri-ui ships inside this repo (henri-ui/, mirrored from Henri's central copy)
 // so the public plugin works without anyone's home folder. Imported relatively.
 import "henri-ui/Motion.js" as Motion
+import "henri-ui" as HUi
 
 Item {
   id: root
@@ -727,6 +728,16 @@ Item {
     return true;
   }
 
+  // Same members, any order.
+  function sameSet(a, b) {
+    if (!a || !b || a.length !== b.length)
+      return false;
+    for (let i = 0; i < a.length; i++)
+      if (b.indexOf(a[i]) < 0)
+        return false;
+    return true;
+  }
+
   function setShown(next) {
     // An explicit open or close always wins over a swipe in progress, so
     // Escape, a click or the keybind can never be locked out by one.
@@ -1024,6 +1035,10 @@ Item {
           } else {
             revealTimeout.stop();
             panel.revealed = false;
+            panel.finishReorder();
+            panel.dragTile = -1;
+            panel.dragSlot = -1;
+            panel.resetTileOrder();
           }
         }
       }
@@ -1100,7 +1115,12 @@ Item {
       // persistent -- without that Hyprland would only create them on demand
       // and the strip would have holes that appear and vanish.
       property var desktops: []
-      onDesktopsLiveChanged: if (!root.sameList(panel.desktops, panel.desktopsLive)) panel.desktops = panel.desktopsLive
+      onDesktopsLiveChanged: {
+        if (!root.sameList(panel.desktops, panel.desktopsLive))
+          panel.desktops = panel.desktopsLive;
+        if (!panel.reorderPending)
+          panel.setSlotIds(panel.desktopsLive.map(d => d.id));
+      }
       readonly property var desktopsLive: {
         const out = [];
         const all = Hyprland.workspaces.values || [];
@@ -1118,7 +1138,222 @@ Item {
 
       Component.onCompleted: {
         panel.desktops = panel.desktopsLive;
+        panel.setSlotIds(panel.desktopsLive.map(d => d.id));
         panel.windows = panel.windowsLive;
+        panel.focusedTile = panel.focusedTileLive;
+      }
+
+      // --- reordering desktops ----------------------------------------------
+      // Drag a thumbnail along the strip to move that desktop elsewhere; the
+      // others slide aside to make room. Hyprland has no workspace order apart
+      // from the ids, and the ids are what SUPER+n means, so a reorder keeps the
+      // ids where they are and moves the WINDOWS between them.
+      //
+      // The strip is built so that nothing is rebuilt when that happens. A
+      // thumbnail is a TILE with a fixed identity, and `tileOrder` says which
+      // tile sits in which slot; a tile shows whatever workspace owns its slot.
+      // On drop the dragged tile simply stays where it was put -- it IS the new
+      // slot's content once Hyprland has moved the windows. Tying the thumbnails
+      // to Hyprland's workspace objects instead would not survive the move: a
+      // workspace that is empty for an instant mid-shuffle is destroyed and
+      // recreated, and a rebuilt thumbnail shows bare wallpaper for the 2-3
+      // frames until its captures deliver.
+      //
+      // Between the drop and Hyprland reporting the moves (`reorderPending`),
+      // the slots, the tiles' windows, the exposé and the focus marker are held
+      // at what is on screen, so the burst of move events cannot show through.
+
+      // Workspace id per slot, ascending. Held while a reorder is in flight.
+      property var slotIds: []
+      // tileOrder[slot] = tile index.
+      property var tileOrder: []
+      signal tilesSnap()
+
+      function setSlotIds(ids) {
+        if (root.sameList(panel.slotIds, ids))
+          return;
+        const resized = ids.length !== panel.slotIds.length;
+        // Order first: the tile Repeater follows slotIds.length, and every tile
+        // must find itself in tileOrder when it is created.
+        if (resized)
+          panel.tileOrder = ids.map((_, i) => i);
+        panel.slotIds = ids;
+        if (resized)
+          panel.tilesSnap();
+      }
+
+      function resetTileOrder() {
+        panel.tileOrder = panel.slotIds.map((_, i) => i);
+        panel.tilesSnap();
+      }
+
+      function deskById(id) {
+        const all = Hyprland.workspaces.values || [];
+        for (let i = 0; i < all.length; i++)
+          if (all[i].id === id)
+            return all[i];
+        return null;
+      }
+
+      readonly property real stripPitch: panel.stripTileW + panel.stripGap
+      readonly property real stripRowX:
+          Math.round((panel.width - panel.slotIds.length * panel.stripPitch + panel.stripGap) / 2)
+
+      // The tile being dragged and the slot it would land in.
+      property int dragTile: -1
+      property int dragSlot: -1
+
+      // tileOrder with the dragged tile moved to where it hovers.
+      readonly property var displayOrder: {
+        const o = panel.tileOrder.slice();
+        const from = o.indexOf(panel.dragTile);
+        if (from < 0 || panel.dragSlot < 0)
+          return o;
+        o.splice(from, 1);
+        o.splice(Math.min(panel.dragSlot, o.length), 0, panel.dragTile);
+        return o;
+      }
+
+      // The tile showing the focused desktop. Held during a reorder: the focus
+      // follows its windows in Hyprland a few milliseconds after the drop, and
+      // the marker must not flick to the wrong tile in between.
+      property int focusedTile: -1
+      readonly property int focusedTileLive: {
+        const s = panel.currentDesktop ? panel.slotIds.indexOf(panel.currentDesktop.id) : -1;
+        return s >= 0 && s < panel.tileOrder.length ? panel.tileOrder[s] : -1;
+      }
+      onFocusedTileLiveChanged: if (!panel.reorderPending) panel.focusedTile = panel.focusedTileLive
+
+      property bool reorderPending: false
+      // address -> workspace id each moved window has to end up on, and the
+      // workspace the focus has to follow to ("" when it stays).
+      property var reorderExpect: ({})
+      property string reorderFocus: ""
+
+      function endDrag(tile) {
+        const order = panel.displayOrder;
+        const from = panel.tileOrder.indexOf(tile);
+        const to = order.indexOf(tile);
+        if (from >= 0 && to >= 0 && from !== to)
+          panel.commitReorder(from, to, order);
+        panel.dragTile = -1;
+        panel.dragSlot = -1;
+      }
+
+      function commitReorder(from, to, order) {
+        // The moves are one Lua function; the legacy parser has no equivalent.
+        if (!Hyprland.usingLua)
+          return;
+        const ids = panel.slotIds.map(id => root.safeWorkspaceId(id));
+        if (ids.indexOf("") >= 0)
+          return;
+        // Every window of each slot, in reading order: each lands on an empty
+        // workspace below, and inserting them left to right, top to bottom
+        // rebuilds the tiling about as it was.
+        const content = [];
+        for (let s = 0; s < ids.length; s++) {
+          const desk = panel.deskById(panel.slotIds[s]);
+          const tls = desk && desk.toplevels ? (desk.toplevels.values || []) : [];
+          const wins = [];
+          for (let i = 0; i < tls.length; i++) {
+            const addr = root.safeAddress(tls[i].address);
+            const o = tls[i].lastIpcObject;
+            if (addr !== "")
+              wins.push({ addr: addr, x: o && o.at ? o.at[0] : 0, y: o && o.at ? o.at[1] : 0 });
+          }
+          wins.sort((a, b) => (a.x - b.x) || (a.y - b.y));
+          content.push(wins.map(w => w.addr));
+        }
+
+        // Where each slot's windows go: the slot its tile now occupies.
+        const dest = [];
+        for (let s = 0; s < ids.length; s++)
+          dest.push(order.indexOf(panel.tileOrder[s]));
+
+        // A drag is a rotation: park the dragged desktop's windows, shift the
+        // ones in between over by one, then drop the parked ones into the gap.
+        // Each step's target has just been emptied, so nothing is inserted into
+        // another desktop's layout. All of it is one Lua call, so Hyprland
+        // applies it in one go. The temporary workspace is a special one, which
+        // nothing lists as a desktop.
+        const park = "special:mcreorder";
+        const steps = [];
+        const move = (slot, target) => {
+          for (let i = 0; i < content[slot].length; i++)
+            steps.push("mv(\"" + content[slot][i] + "\", \"" + target + "\")");
+        };
+        move(from, park);
+        if (from < to)
+          for (let k = from; k < to; k++) move(k + 1, ids[k]);
+        else
+          for (let k = from; k > to; k--) move(k - 1, ids[k]);
+        move(from, ids[to]);
+
+        // Stay on the desktop you were on: follow its windows.
+        const focusSlot = panel.currentDesktop ? panel.slotIds.indexOf(panel.currentDesktop.id) : -1;
+        const focusTo = focusSlot >= 0 && dest[focusSlot] !== focusSlot ? ids[dest[focusSlot]] : "";
+        if (focusTo !== "")
+          steps.push("pcall(hl.dispatch, hl.dsp.focus({ workspace = \"" + focusTo + "\" }))");
+
+        const expect = {};
+        for (let s = 0; s < ids.length; s++)
+          for (let i = 0; i < content[s].length; i++)
+            expect[content[s][i]] = ids[dest[s]];
+
+        // Hold everything first, then re-seat the tiles, then send it.
+        panel.reorderExpect = expect;
+        panel.reorderFocus = focusTo;
+        panel.reorderPending = true;
+        panel.tileOrder = order;
+        reorderDeadline.restart();
+        if (steps.length === 0)
+          return;
+        // pcall per step: a window that closed in the meantime must not abort
+        // the rest and strand windows on the parking workspace.
+        root.dispatch("function() local function mv(a, w) pcall(hl.dispatch, hl.dsp.window.move({ workspace = w, follow = false, window = \"address:\" .. a })) end "
+                      + steps.join(" ") + " end", "");
+      }
+
+      function reorderLanded() {
+        const tls = Hyprland.toplevels.values || [];
+        for (let i = 0; i < tls.length; i++) {
+          const want = panel.reorderExpect[root.safeAddress(tls[i].address)];
+          if (want !== undefined && (!tls[i].workspace || String(tls[i].workspace.id) !== want))
+            return false;
+        }
+        return panel.reorderFocus === ""
+            || (panel.currentDesktop !== null && String(panel.currentDesktop.id) === panel.reorderFocus);
+      }
+
+      function finishReorder() {
+        if (!panel.reorderPending)
+          return;
+        reorderDeadline.stop();
+        panel.reorderPending = false;
+        panel.reorderExpect = ({});
+        panel.reorderFocus = "";
+        panel.setSlotIds(panel.desktopsLive.map(d => d.id));
+        panel.focusedTile = panel.focusedTileLive;
+        // Same windows, possibly in a new focus order: keep the array, or the
+        // exposé would rebuild every window it is showing.
+        if (!root.sameSet(panel.windows, panel.windowsLive))
+          panel.windows = panel.windowsLive;
+        // The windows' positions on their new workspaces.
+        Hyprland.refreshToplevels();
+      }
+
+      Timer {
+        interval: 16
+        repeat: true
+        running: panel.reorderPending
+        onTriggered: if (panel.reorderLanded()) panel.finishReorder()
+      }
+
+      // Never hold the overview frozen on a move that did not happen.
+      Timer {
+        id: reorderDeadline
+        interval: 1000
+        onTriggered: panel.finishReorder()
       }
 
       readonly property var currentDesktop: {
@@ -1132,7 +1367,7 @@ Item {
       // focusHistoryID counts up from the window you were last in, so ascending
       // order puts the one you are coming back to in the top-left.
       property var windows: []
-      onWindowsLiveChanged: if (!root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
+      onWindowsLiveChanged: if (!panel.reorderPending && !root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
       readonly property var windowsLive: panel.windowsOf(panel.currentDesktop)
 
       function windowsOf(desk) {
@@ -1184,6 +1419,9 @@ Item {
         const i = panel.desktops.indexOf(panel.currentDesktop);
         const old = panel.deskIndex;
         panel.deskIndex = i;
+        // Following a desktop's windows to their new slot is not a switch.
+        if (panel.reorderPending)
+          return;
         if (!panel.slideOwner || !root.shown || old < 0 || i < 0 || i === old)
           return;
         const step = root.slidePendingDir !== 0 ? root.slidePendingDir : i - old;
@@ -1209,7 +1447,8 @@ Item {
       // Thumbnails keep the screen's aspect ratio, so each is a faithful
       // miniature. Fit to whichever axis runs out first -- with a dozen
       // desktops it is the width, with two it is the strip height.
-      readonly property int deskCount: Math.max(1, panel.desktops.length)
+      // Off the held slots, so a reorder's burst of events cannot resize them.
+      readonly property int deskCount: Math.max(1, panel.slotIds.length)
       readonly property real stripTileH: Math.min(
           stripH - stripLabelBand - stripPad * 2,
           ((panel.width * 0.92) - (deskCount - 1) * stripGap) / deskCount * (panel.height / panel.width))
@@ -1538,209 +1777,337 @@ Item {
             color: Util.alpha(panel.overlayInk, Motion.hairlineAlpha)
           }
 
-          Row {
-            anchors.centerIn: parent
-            spacing: panel.stripGap
+          // Top of the thumbnail row, centred in the strip as before.
+          readonly property real rowY:
+              Math.round((panel.stripH - panel.stripTileH - panel.stripLabelBand) / 2)
 
-            Repeater {
-              model: panel.desktops
+          // Labels belong to the SLOTS, not to the thumbnails: a desktop's
+          // number is its place, so dragging a thumbnail carries its windows
+          // along and leaves the numbering in order -- as in macOS. The bright
+          // label marks where the desktop you are on is (or will be) sitting.
+          Repeater {
+            model: panel.slotIds.length
 
-              delegate: Item {
-                id: deskCell
-                required property var modelData
-                width: panel.stripTileW
-                height: panel.stripTileH + panel.stripLabelBand
-
-                property var deskWindows: []
-                onDeskWindowsLiveChanged: if (!root.sameList(deskCell.deskWindows, deskCell.deskWindowsLive)) deskCell.deskWindows = deskCell.deskWindowsLive
-                Component.onCompleted: deskCell.deskWindows = deskCell.deskWindowsLive
-                readonly property var deskWindowsLive: {
-                  const out = [];
-                  const tls = deskCell.modelData.toplevels ? (deskCell.modelData.toplevels.values || []) : [];
-                  for (let i = 0; i < tls.length; i++) {
-                    const t = tls[i];
-                    const o = t.lastIpcObject;
-                    if (!t.wayland || !o || o.mapped === false || o.hidden === true)
-                      continue;
-                    out.push(t);
-                  }
-                  // Back to front: the window you last used ends up on top,
-                  // which is where it is on the real desktop.
-                  out.sort((a, b) => (b.lastIpcObject.focusHistoryID || 0) - (a.lastIpcObject.focusHistoryID || 0));
-                  return out;
+            delegate: Text {
+              id: slotLabel
+              required property int index
+              readonly property int wsId: panel.slotIds[slotLabel.index] ?? -1
+              readonly property var desk: panel.deskById(slotLabel.wsId)
+              readonly property bool marked: panel.displayOrder[slotLabel.index] === panel.focusedTile
+              x: panel.stripRowX + slotLabel.index * panel.stripPitch
+              y: strip.rowY + panel.stripTileH
+              width: panel.stripTileW
+              height: panel.stripLabelBand
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+              // Same treatment as the window title: a workspace name is
+              // configuration-supplied text, not markup.
+              textFormat: Text.PlainText
+              text: root.displayLabel(slotLabel.desk ? (slotLabel.desk.name || slotLabel.desk.id) : slotLabel.wsId)
+              // An explicit sans face: the system's default `sans` resolves
+              // to Comic Code here, a monospace whose digits look like kana
+              // once they are scaled up.
+              font.family: root.fontFamily
+              font.pixelSize: panel.stripLabelSize
+              color: slotLabel.marked ? panel.overlayInk
+                                      : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
+              Behavior on color {
+                ColorAnimation {
+                  duration: slotLabel.marked ? Motion.instant : Motion.fast
+                  easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                 }
+              }
+              style: Text.Raised
+              styleColor: Qt.rgba(0, 0, 0, 0.55)
+            }
+          }
 
+          Repeater {
+            model: panel.slotIds.length
+
+            delegate: Item {
+              id: deskCell
+              required property int index
+              width: panel.stripTileW
+              height: panel.stripTileH
+
+              // The slot this tile's windows belong to (committed order), and
+              // the slot it is drawn at (with a drag in progress).
+              readonly property int homeSlot: panel.tileOrder.indexOf(deskCell.index)
+              readonly property int shownSlot: panel.displayOrder.indexOf(deskCell.index)
+              readonly property int wsId: deskCell.homeSlot >= 0 ? (panel.slotIds[deskCell.homeSlot] ?? -1) : -1
+              readonly property var desk: panel.deskById(deskCell.wsId)
+              readonly property bool isFocused: panel.focusedTile === deskCell.index
+
+              // --- drag to reorder ---------------------------------------
+              readonly property bool held: deskDrag.active
+              // Released and still flying home: stays on top of its neighbours.
+              property bool landing: false
+              property real dragHomeX: 0
+              property real dragOriginX: 0
+              property real dragOriginY: 0
+              property real dragDX: 0
+              property real dragDY: 0
+              readonly property real slotX: panel.stripRowX + Math.max(0, deskCell.shownSlot) * panel.stripPitch
+
+              // Held: pinned to the pointer. Otherwise the tile glides to its
+              // slot -- smooth for the neighbours making room, snappy for the
+              // dropped one settling in, carrying the release speed.
+              HUi.SpringValue {
+                id: xSpring
+                to: deskCell.held ? deskCell.dragHomeX + deskCell.dragDX : deskCell.slotX
+                preset: deskCell.held || deskCell.landing ? Motion.snappy : Motion.smooth
+                epsilon: 0.5
+                onRunningChanged: deskCell.checkLanded()
+              }
+              HUi.SpringValue {
+                id: ySpring
+                to: deskCell.held ? deskCell.dragDY : 0
+                preset: Motion.snappy
+                epsilon: 0.5
+                onRunningChanged: deskCell.checkLanded()
+              }
+              HUi.SpringValue {
+                id: liftSpring
+                to: deskCell.held ? Motion.liftScale : 1
+                preset: Motion.snappy
+              }
+
+              function checkLanded() {
+                if (!xSpring.running && !ySpring.running)
+                  deskCell.landing = false;
+              }
+
+              Connections {
+                target: panel
+                function onTilesSnap() {
+                  xSpring.snap(xSpring.to);
+                  ySpring.snap(ySpring.to);
+                  deskCell.landing = false;
+                }
+              }
+
+              x: xSpring.value
+              y: strip.rowY + ySpring.value
+              z: deskCell.held || deskCell.landing ? 2 : 0
+              scale: liftSpring.value
+
+              property var deskWindows: []
+              // Held during a reorder -- the tile keeps showing what it showed
+              // until Hyprland has moved the windows to match it.
+              onDeskWindowsLiveChanged: if (!panel.reorderPending && !root.sameList(deskCell.deskWindows, deskCell.deskWindowsLive)) deskCell.deskWindows = deskCell.deskWindowsLive
+              Component.onCompleted: deskCell.deskWindows = deskCell.deskWindowsLive
+              Connections {
+                target: panel
+                // Same windows, maybe in a new stacking order: keep the array,
+                // or every capture in the tile is rebuilt and blanks for frames.
+                function onReorderPendingChanged() {
+                  if (!panel.reorderPending && !root.sameSet(deskCell.deskWindows, deskCell.deskWindowsLive))
+                    deskCell.deskWindows = deskCell.deskWindowsLive;
+                }
+              }
+              readonly property var deskWindowsLive: {
+                const out = [];
+                const tls = deskCell.desk && deskCell.desk.toplevels ? (deskCell.desk.toplevels.values || []) : [];
+                for (let i = 0; i < tls.length; i++) {
+                  const t = tls[i];
+                  const o = t.lastIpcObject;
+                  if (!t.wayland || !o || o.mapped === false || o.hidden === true)
+                    continue;
+                  out.push(t);
+                }
+                // Back to front: the window you last used ends up on top,
+                // which is where it is on the real desktop.
+                out.sort((a, b) => (b.lastIpcObject.focusHistoryID || 0) - (a.lastIpcObject.focusHistoryID || 0));
+                return out;
+              }
+
+              Item {
+                id: thumb
+                width: panel.stripTileW
+                height: panel.stripTileH
+
+                // Rounded corners the only way QtQuick offers for arbitrary
+                // content: render the tile to a texture and mask it with a
+                // rounded rectangle. `clip: true` would only ever cut a square.
                 Item {
-                  id: thumb
-                  width: panel.stripTileW
-                  height: panel.stripTileH
+                  anchors.fill: parent
+                  layer.enabled: true
+                  layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: thumbMask
+                    maskThresholdMin: 0.5
+                    maskSpreadAtMin: 1.0
+                  }
 
-                  // Rounded corners the only way QtQuick offers for arbitrary
-                  // content: render the tile to a texture and mask it with a
-                  // rounded rectangle. `clip: true` would only ever cut a square.
-                  Item {
+                  // Every desktop shows the wallpaper, windows or not -- that
+                  // is what makes an empty one read as "an empty desktop"
+                  // rather than as a hole in the strip.
+                  Image {
                     anchors.fill: parent
-                    layer.enabled: true
-                    layer.effect: MultiEffect {
-                      maskEnabled: true
-                      maskSource: thumbMask
-                      maskThresholdMin: 0.5
-                      maskSpreadAtMin: 1.0
-                    }
+                    source: wallpaper.source
+                    fillMode: Image.PreserveAspectCrop
+                    // No sourceSize -- same source and same (absent) size as
+                    // the background image, so this is a cache hit. See the
+                    // note there for why asking for a smaller decode is a
+                    // pessimisation, not an optimisation.
+                    asynchronous: false
+                    cache: true
+                    smooth: true
+                  }
 
-                    // Every desktop shows the wallpaper, windows or not -- that
-                    // is what makes an empty one read as "an empty desktop"
-                    // rather than as a hole in the strip.
-                    Image {
-                      anchors.fill: parent
-                      source: wallpaper.source
-                      fillMode: Image.PreserveAspectCrop
-                      // No sourceSize -- same source and same (absent) size as
-                      // the background image, so this is a cache hit. See the
-                      // note there for why asking for a smaller decode is a
-                      // pessimisation, not an optimisation.
-                      asynchronous: false
-                      cache: true
-                      smooth: true
-                    }
+                  Repeater {
+                    model: deskCell.deskWindows
 
-                    Repeater {
-                      model: deskCell.deskWindows
+                    delegate: ScreencopyView {
+                      required property var modelData
+                      readonly property var ipc: modelData.lastIpcObject
+                      readonly property real k: panel.stripTileW / panel.monW
 
-                      delegate: ScreencopyView {
-                        required property var modelData
-                        readonly property var ipc: modelData.lastIpcObject
-                        readonly property real k: panel.stripTileW / panel.monW
+                      // lastIpcObject goes undefined for a beat -- a toplevel
+                      // Hyprland has announced but not yet described, or one
+                      // being torn down while the model still holds it. The
+                      // model filter cannot prevent that: it runs once, and
+                      // these are live bindings that re-evaluate afterwards.
+                      // Unguarded they throw on `.at[0]` and flood the log at
+                      // shell startup, when every window is announced at once.
+                      readonly property var at: (ipc && ipc.at) ? ipc.at : [0, 0]
+                      readonly property var size: (ipc && ipc.size) ? ipc.size : [0, 0]
 
-                        // lastIpcObject goes undefined for a beat -- a toplevel
-                        // Hyprland has announced but not yet described, or one
-                        // being torn down while the model still holds it. The
-                        // model filter cannot prevent that: it runs once, and
-                        // these are live bindings that re-evaluate afterwards.
-                        // Unguarded they throw on `.at[0]` and flood the log at
-                        // shell startup, when every window is announced at once.
-                        readonly property var at: (ipc && ipc.at) ? ipc.at : [0, 0]
-                        readonly property var size: (ipc && ipc.size) ? ipc.size : [0, 0]
+                      x: (at[0] - panel.monX) * k
+                      y: (at[1] - panel.monY) * k
+                      width: size[0] * k
+                      height: size[1] * k
 
-                        x: (at[0] - panel.monX) * k
-                        y: (at[1] - panel.monY) * k
-                        width: size[0] * k
-                        height: size[1] * k
-
-                        // No capture source at all while hidden. ScreencopyView
-                        // requests a frame from the compositor the moment it has
-                        // a source, regardless of `live`, so a bare
-                        // `captureSource` here means every screen change (or
-                        // shell start) fires one capture per window while the
-                        // overlay is not even visible. Null tears the context
-                        // down; `shown` flipping true creates it and captures.
-                        captureSource: root.shown ? modelData.wayland : null
-                        // Live, but only while shown. This plugin stays
-                        // mounted, so an unconditional `live: true` would keep
-                        // pulling frames of every window on every workspace
-                        // forever, for a view nobody is looking at.
-                        //
-                        // A one-shot `live: false` + captureFrame() on open was
-                        // tried, to cut the cost of capturing every window on
-                        // every desktop. Reverted: the high CPU that motivated
-                        // it turned out to be an artifact of measuring while a
-                        // terminal was animating on the captured desktop, not a
-                        // standing cost -- and one-shot capture of an
-                        // *off-screen* toplevel is unverified, where live
-                        // capture of one is measured and works. Do not
-                        // reintroduce it without a window open on another
-                        // workspace to test against.
-                        // ...and not until the shrink has finished: every
-                        // frame of another desktop is a render Hyprland does
-                        // just for us, and doing that for all desktops while
-                        // the windows are moving is what dropped frames. The
-                        // source above still takes one frame straight away.
-                        live: root.shown && root.settled
-                        paintCursor: false
-                      }
-                    }
-
-                    Rectangle {
-                      anchors.fill: parent
-                      color: "#05060a"
-                      opacity: deskCell.modelData.focused ? 0.0 : (deskHover.hovered ? 0.10 : 0.28)
-                      Behavior on opacity {
-                        NumberAnimation {
-                          duration: deskHover.hovered ? Motion.instant : Motion.fast
-                          easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
-                        }
-                      }
+                      // No capture source at all while hidden. ScreencopyView
+                      // requests a frame from the compositor the moment it has
+                      // a source, regardless of `live`, so a bare
+                      // `captureSource` here means every screen change (or
+                      // shell start) fires one capture per window while the
+                      // overlay is not even visible. Null tears the context
+                      // down; `shown` flipping true creates it and captures.
+                      captureSource: root.shown ? modelData.wayland : null
+                      // Live, but only while shown. This plugin stays
+                      // mounted, so an unconditional `live: true` would keep
+                      // pulling frames of every window on every workspace
+                      // forever, for a view nobody is looking at.
+                      //
+                      // A one-shot `live: false` + captureFrame() on open was
+                      // tried, to cut the cost of capturing every window on
+                      // every desktop. Reverted: the high CPU that motivated
+                      // it turned out to be an artifact of measuring while a
+                      // terminal was animating on the captured desktop, not a
+                      // standing cost -- and one-shot capture of an
+                      // *off-screen* toplevel is unverified, where live
+                      // capture of one is measured and works. Do not
+                      // reintroduce it without a window open on another
+                      // workspace to test against.
+                      // ...and not until the shrink has finished: every
+                      // frame of another desktop is a render Hyprland does
+                      // just for us, and doing that for all desktops while
+                      // the windows are moving is what dropped frames. The
+                      // source above still takes one frame straight away.
+                      live: root.shown && root.settled
+                      paintCursor: false
                     }
                   }
 
-                  Item {
-                    id: thumbMask
-                    anchors.fill: parent
-                    layer.enabled: true
-                    visible: false
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: panel.thumbRadius
-                      color: "black"
-                    }
-                  }
-
-                  // One border at three brightnesses -- the desktop you are on,
-                  // the one under the cursor, the rest. A second colour here
-                  // would read as a second meaning.
                   Rectangle {
                     anchors.fill: parent
-                    radius: panel.thumbRadius
-                    color: Util.alpha(panel.overlayInk, 0)
-                    border.width: Math.max(1, Math.round(2 * panel.uiScale))
-                    border.color: deskCell.modelData.focused ? Util.alpha(panel.overlayInk, 0.96)
-                                : deskHover.hovered ? Util.alpha(panel.overlayInk, 0.55)
-                                : Util.alpha(panel.overlayInk, 0.16)
-                    Behavior on border.color {
-                      ColorAnimation {
+                    color: "#05060a"
+                    opacity: deskCell.isFocused ? 0.0 : (deskHover.hovered || deskCell.held ? 0.10 : 0.28)
+                    Behavior on opacity {
+                      NumberAnimation {
                         duration: deskHover.hovered ? Motion.instant : Motion.fast
                         easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                       }
                     }
                   }
+                }
 
-                  HoverHandler { id: deskHover }
-                  TapHandler { onTapped: root.goToWorkspace(deskCell.modelData.id) }
+                Item {
+                  id: thumbMask
+                  anchors.fill: parent
+                  layer.enabled: true
+                  visible: false
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: panel.thumbRadius
+                    color: "black"
+                  }
+                }
 
-                  scale: deskHover.hovered ? 1.03 : 1.0
-                  Behavior on scale {
-                    NumberAnimation {
+                // One border at three brightnesses -- the desktop you are on,
+                // the one under the cursor, the rest. A second colour here
+                // would read as a second meaning.
+                Rectangle {
+                  anchors.fill: parent
+                  radius: panel.thumbRadius
+                  color: Util.alpha(panel.overlayInk, 0)
+                  border.width: Math.max(1, Math.round(2 * panel.uiScale))
+                  border.color: deskCell.isFocused ? Util.alpha(panel.overlayInk, 0.96)
+                              : deskHover.hovered || deskCell.held ? Util.alpha(panel.overlayInk, 0.55)
+                              : Util.alpha(panel.overlayInk, 0.16)
+                  Behavior on border.color {
+                    ColorAnimation {
                       duration: deskHover.hovered ? Motion.instant : Motion.fast
                       easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                     }
                   }
                 }
 
-                Text {
-                  y: panel.stripTileH
-                  width: parent.width
-                  height: panel.stripLabelBand
-                  horizontalAlignment: Text.AlignHCenter
-                  verticalAlignment: Text.AlignVCenter
-                  // Same treatment as the window title: a workspace name is
-                  // configuration-supplied text, not markup.
-                  textFormat: Text.PlainText
-                  text: root.displayLabel(deskCell.modelData.name || deskCell.modelData.id)
-                  // An explicit sans face: the system's default `sans` resolves
-                  // to Comic Code here, a monospace whose digits look like kana
-                  // once they are scaled up.
-                  font.family: root.fontFamily
-                  font.pixelSize: panel.stripLabelSize
-                  color: deskCell.modelData.focused ? panel.overlayInk
-                                                    : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
-                  Behavior on color {
-                    ColorAnimation {
-                      duration: deskCell.modelData.focused ? Motion.instant : Motion.fast
-                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                HoverHandler { id: deskHover }
+                TapHandler { onTapped: if (deskCell.wsId >= 0) root.goToWorkspace(deskCell.wsId) }
+
+                // Positions are read off the scene, not the handler's own
+                // translation: the tile moves under the pointer, and a
+                // translation measured in the tile's coordinates would chase
+                // itself. The offset is taken from where the drag ACTIVATED,
+                // so the tile does not jump by the drag threshold.
+                DragHandler {
+                  id: deskDrag
+                  target: null
+                  enabled: panel.slotIds.length > 1 && root.settled && !panel.reorderPending && Hyprland.usingLua
+                  cursorShape: Qt.ClosedHandCursor
+                  onActiveChanged: {
+                    if (active) {
+                      deskCell.dragHomeX = xSpring.value;
+                      deskCell.dragOriginX = centroid.scenePosition.x;
+                      deskCell.dragOriginY = centroid.scenePosition.y;
+                      deskCell.dragDX = 0;
+                      deskCell.dragDY = 0;
+                      xSpring.snap(xSpring.to);
+                      ySpring.snap(ySpring.to);
+                      panel.dragTile = deskCell.index;
+                      panel.dragSlot = deskCell.homeSlot;
+                    } else {
+                      deskCell.landing = true;
+                      const cap = Motion.maximumFlickVelocity;
+                      xSpring.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.x));
+                      ySpring.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.y));
+                      panel.endDrag(deskCell.index);
                     }
                   }
-                  style: Text.Raised
-                  styleColor: Qt.rgba(0, 0, 0, 0.55)
+                  onCentroidChanged: {
+                    if (!active)
+                      return;
+                    deskCell.dragDX = centroid.scenePosition.x - deskCell.dragOriginX;
+                    deskCell.dragDY = centroid.scenePosition.y - deskCell.dragOriginY;
+                    xSpring.snap(xSpring.to);
+                    ySpring.snap(ySpring.to);
+                    // The slot under the tile's centre.
+                    const centre = deskCell.dragHomeX + deskCell.dragDX + panel.stripTileW / 2;
+                    const slot = Math.floor((centre - panel.stripRowX + panel.stripGap / 2) / panel.stripPitch);
+                    panel.dragSlot = Math.max(0, Math.min(panel.slotIds.length - 1, slot));
+                  }
+                }
+
+                scale: deskHover.hovered && !deskCell.held ? 1.03 : 1.0
+                Behavior on scale {
+                  NumberAnimation {
+                    duration: deskHover.hovered ? Motion.instant : Motion.fast
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                  }
                 }
               }
             }

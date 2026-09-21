@@ -32,8 +32,12 @@
   --radius-chip: 5px;
 
   --press-scale: 0.97;
+  --lift-scale: 1.05;      /* dragged item while held (reorder) */
+  --icon-from-scale: 0.8;
   --flash-duration: 70ms;
   --stagger-step: 15ms;
+  --shake-distance: 6px;   /* wrong password: 3 swings */
+  --shake-duration: 300ms;
 
   /* Size (Apple HIG, desktop) */
   --control-height: 28px;

@@ -2,23 +2,7 @@
  * Apps load this at runtime from ~/.local/share/henri-ui/gtk.css
  * (gtk::CssProvider, priority APPLICATION) and watch it with a FileMonitor,
  * so edits here reach every app. Never copy it into an app. */
-:root {
-  --dur-instant: 90ms;
-  --dur-fast: 160ms;
-  --dur-base: 240ms;
-  --dur-slow: 380ms;
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in-out: cubic-bezier(0.45, 0, 0.15, 1);
-  --ease-exit: cubic-bezier(0.4, 0, 0.7, 0.2);
-
-  --radius-panel: 14px;
-  --radius-popover: 10px;
-  --radius-control: 8px;
-  --radius-row: 6px;
-
-  --control-height: 28px;
-  --control-min: 20px;
-}
+@import url("gtk-tokens.css");
 
 button { min-height: 28px; }
 

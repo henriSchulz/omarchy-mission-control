@@ -1,0 +1,32 @@
+/* Henri UI tokens for GTK4/libadwaita — values only, no rules.
+ * Loaded by gtk.css (henri-ui apps) and by ~/.config/gtk-4.0/gtk.css, which
+ * restyles stock apps (Files) with scoped rules built from these tokens.
+ * Mirrors Motion.js / motion.css — change a value in all three. */
+:root {
+  --dur-instant: 90ms;
+  --dur-fast: 160ms;
+  --dur-base: 240ms;
+  --dur-slow: 380ms;
+  --dur-base-exit: 168ms;   /* base × 0.7 */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.15, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 0.7, 0.2);
+
+  --radius-panel: 14px;
+  --radius-popover: 10px;
+  --radius-control: 8px;
+  --radius-row: 6px;
+  --radius-chip: 5px;
+
+  --control-height: 28px;
+  --control-min: 20px;
+  --menu-row-height: 26px;
+  --menu-row-padding: 10px;
+
+  --press-scale: 0.97;
+  --lift-scale: 1.05;
+  --hover-alpha: 8%;
+  --pressed-alpha: 14%;
+  --hairline-alpha: 12%;
+  --secondary-text-alpha: 65%;
+}

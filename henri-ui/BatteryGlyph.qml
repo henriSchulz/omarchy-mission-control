@@ -108,7 +108,7 @@ Item {
     x: (root.bodyW - width) / 2
     y: (root.bodyH - height) / 2
     opacity: root.mark === "" ? 0 : 1
-    scale: root.mark === "" ? 0.8 : 1
+    scale: root.mark === "" ? Motion.iconFromScale : 1
     Behavior on opacity { NumberAnimation { duration: Motion.fast } }
     Behavior on scale { NumberAnimation { duration: Motion.fast; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut } }
 
