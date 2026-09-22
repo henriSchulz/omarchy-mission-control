@@ -11,6 +11,8 @@ import "Motion.js" as Motion
 //   HUi.MenuList {
 //     model: [ { text: "Neu", icon: "󰐕", shortcut: "⌘N" }, { separator: true },
 //              { text: "Löschen", danger: true } ]
+//     // `checked` on any entry adds NSMenu's state column: ✓ in front of the
+//     // checked ones, the other labels stay aligned.
 //     onActivated: (index, entry) => { menu.open = false; run(entry) }
 //   }
 FocusScope {
@@ -23,6 +25,11 @@ FocusScope {
   property bool flashing: false
 
   signal activated(int index, var entry)
+
+  readonly property bool hasCheckColumn: {
+    for (var i = 0; i < model.length; i++) if (model[i] && model[i].checked !== undefined) return true
+    return false
+  }
 
   implicitWidth: Math.max(minWidth, col.rowsWidth)
   implicitHeight: col.implicitHeight
@@ -128,6 +135,17 @@ FocusScope {
           x: Style.spacing.xl
           spacing: Style.spacing.lg
 
+          Text {
+            visible: root.hasCheckColumn
+            width: Style.space(10)
+            horizontalAlignment: Text.AlignHCenter
+            text: row.modelData.checked === true ? "✓" : ""
+            color: row.textColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.weight: Font.DemiBold
+            anchors.verticalCenter: parent.verticalCenter
+          }
           Text {
             visible: !!row.modelData.icon
             text: row.modelData.icon || ""
