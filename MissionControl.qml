@@ -50,6 +50,12 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
 
+  // One line in the shell log on mount, so "is the new code running?" has an
+  // answer after a restart (the shell's hot reload does not re-create a
+  // keepLoaded overlay, and a cached old version is otherwise invisible).
+  readonly property string build: "1.4.0 pages"
+  Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
+
   // What the user last asked for, as opposed to what is currently on screen.
   // The shell reads this to decide what `toggle` means, and it has to be the
   // intent rather than the state: the open and the close are both animated, so
@@ -2600,6 +2606,13 @@ Item {
           HoverHandler {
             id: stripHover
             onHoveredChanged: if (hovered && root.settled) panel.stripExpanded = true
+          }
+          // ...and a pointer that was already up here while the windows were
+          // still settling: there is no second hover event for it, so the
+          // settling itself is the touch.
+          Connections {
+            target: root
+            function onSettledChanged() { if (root.settled && stripHover.hovered && root.missionMode) panel.stripExpanded = true }
           }
 
           // Top of the thumbnail row, centred in the unfolded strip.
