@@ -1694,7 +1694,31 @@ Item {
       // focusHistoryID counts up from the window you were last in, so ascending
       // order puts the one you are coming back to in the top-left.
       property var windows: []
-      onWindowsLiveChanged: if (!panel.reorderPending && !root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
+      // Reassigning the array rebuilds every delegate, captures included, and
+      // a rebuilt capture is blank for a few frames. So while the overview is
+      // up the order does not matter (it is only the layout order for a fresh
+      // open): the array is kept as long as the same windows are in it. And
+      // while it is closing nothing is taken over at all: clicking a window
+      // focuses it, Hyprland reorders the focus history at once, and the
+      // rebuild landed right in the middle of the close animation.
+      onWindowsLiveChanged: {
+        if (panel.reorderPending)
+          return;
+        if (root.shown && !root.opened)
+          return;
+        const same = root.shown ? root.sameSet(panel.windows, panel.windowsLive)
+                                : root.sameList(panel.windows, panel.windowsLive);
+        if (!same)
+          panel.windows = panel.windowsLive;
+      }
+      // Whatever was held back during the close is taken over once hidden.
+      Connections {
+        target: root
+        function onShownChanged() {
+          if (!root.shown && !panel.reorderPending && !root.sameList(panel.windows, panel.windowsLive))
+            panel.windows = panel.windowsLive;
+        }
+      }
       // App Exposé shows one app from every desktop; the other modes the
       // current desktop.
       readonly property var windowsLive: root.appMode ? panel.appWindows(root.appClass)
