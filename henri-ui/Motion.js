@@ -27,7 +27,12 @@ var instant = ms(90)    // hover in, press feedback
 var fast = ms(160)      // hover out, color change, icon/text crossfade, tooltip
 var base = ms(240)      // menus, dropdowns, toggles, small size changes
 var slow = ms(380)      // panels, popovers, sheets, page transitions
-var slower = ms(520)    // full screen: overview, mission control, launcher
+var slower = ms(520)    // full screen rebuild: overview, launcher
+// Mission Control, measured on macOS 26 (60 fps recording, missionControl.2windows
+// in ~/macos-scrape): the windows shrink into the overview in 250 ms on an
+// ease-in-out, and return in ~165 ms on an ease-out (fast start).
+var overview = ms(250)
+var overviewExit = ms(165)
 
 function exit(d) { return Math.round(d * 0.7) }   // leaving is faster than arriving
 

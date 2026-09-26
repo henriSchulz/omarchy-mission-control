@@ -11,6 +11,8 @@
   --dur-base: 240ms;
   --dur-slow: 380ms;
   --dur-slower: 520ms;
+  --dur-overview: 250ms;      /* Mission Control open, measured on macOS */
+  --dur-overview-exit: 165ms; /* ...and close (ease-out) */
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in-out: cubic-bezier(0.45, 0, 0.15, 1);

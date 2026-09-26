@@ -378,8 +378,11 @@ Item {
   // henri-ui full-screen tokens: the open (keyboard, click, backstop) runs
   // Motion.slower, the close the exit share of it -- leaving is faster than
   // arriving. Both follow Motion.speed.
-  readonly property int shrinkDuration: Motion.slower
-  readonly property int unshrinkDuration: Motion.exit(Motion.slower)
+  // Measured on macOS 26 (60 fps recording, missionControl.2windows in
+  // ~/macos-scrape): the open takes 250 ms, the close ~165 ms -- henri-ui's
+  // overview tokens. The earlier `slower` (520 ms) was twice the real thing.
+  readonly property int shrinkDuration: Motion.overview
+  readonly property int unshrinkDuration: Motion.overviewExit
   // Shortest animation, for finishing a nearly-done shrink.
   readonly property int shrinkMinDuration: Motion.fast
   // The closing crossfade over the tail: a short exit fade.
@@ -391,6 +394,11 @@ Item {
   // full speed, and the windows would slam into their real rects right where
   // the copy has to be indistinguishable from the desktop.
   readonly property var shrinkCurve: Motion.easeInOut
+  // The close starts fast and settles (measured: a third of the way home
+  // after the first 25 ms, then easing in) -- easeOut, not the mirror of the
+  // open. It still ends slowly, so the copy lands on the real window rather
+  // than slamming into it.
+  readonly property var unshrinkCurve: Motion.easeOut
   // Share of the duration after which the curve is ~98.8% home -- where the
   // closing crossfade starts.
   readonly property real fadeStartAt: 0.85
@@ -458,7 +466,7 @@ Item {
     progressAnim.to = to;
     progressAnim.duration = Math.max(root.shrinkMinDuration, Math.min(full, dur));
     progressAnim.easing.type = Easing.BezierSpline;
-    progressAnim.easing.bezierCurve = root.shrinkCurve;
+    progressAnim.easing.bezierCurve = to > root.progress ? root.shrinkCurve : root.unshrinkCurve;
     root.progressAnimDuration = progressAnim.duration;
     progressAnim.start();
   }
@@ -477,11 +485,11 @@ Item {
   // but the low-pass filter that keeps the windows attached to the fingers.
   // Tying it to Motion.speed would make direct manipulation feel laggy.
   readonly property real springOmegaTracking: 28
-  // The release is an animation, so it is henri-ui's `gentle` spring (big
-  // surfaces, no overshoot): omega = 2 pi / response, which also keeps it in
-  // step with Motion.speed. Critically damped like before; settles (1.5%) in
-  // ~5.2 / omega: ~410ms after release at speed 1.
-  readonly property real springOmegaRelease: 2 * Math.PI / Motion.gentle.response
+  // The release is an animation, so it is henri-ui's `smooth` spring (no
+  // overshoot): omega = 2 pi / response, which also keeps it in step with
+  // Motion.speed. Critically damped; settles (1.5%) in ~5.2 / omega: ~290ms
+  // after release at speed 1 -- in the region of the measured 250 ms open.
+  readonly property real springOmegaRelease: 2 * Math.PI / Motion.smooth.response
 
   FrameAnimation {
     id: progressSpring
@@ -1166,6 +1174,11 @@ Item {
         target: root
         function onShownChanged() {
           if (root.shown) {
+            // With a single desktop macOS shows its thumbnail straight away
+            // (measured: the recording's strip has the thumbnail and the "+"
+            // from the first frame); the strip only folds to names when
+            // there are several.
+            panel.stripExpanded = panel.slotIds.length <= 1;
             if (panel.capturesReady) panel.revealed = true;
             else revealTimeout.restart();
           } else {
