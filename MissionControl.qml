@@ -2500,15 +2500,14 @@ Item {
             event.accepted = true;
             return;
           }
-          // Number keys jump straight to a desktop, like SUPER+n does normally.
+          // Number keys switch to that desktop and stay open, like the arrow
+          // keys: look before you leap.
           if (root.missionMode && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const want = event.key - Qt.Key_0;
-            for (let i = 0; i < panel.desktops.length; i++) {
-              if (panel.desktops[i].id === want) {
-                root.goToWorkspace(want);
-                event.accepted = true;
-                return;
-              }
+            if (panel.deskIndexOf(want) >= 0) {
+              panel.switchTo(want);
+              event.accepted = true;
+              return;
             }
           }
         }
@@ -2521,13 +2520,22 @@ Item {
         if (n === 0)
           return;
         let i = Math.max(0, panel.desktops.indexOf(panel.currentDesktop));
-        const next = panel.desktops[(i + dir + n) % n];
-        const target = root.safeWorkspaceId(next.id);
-        if (target === "")
+        panel.switchTo(panel.desktops[(i + dir + n) % n].id);
+      }
+
+      // Switch desktop but stay open: the other desktop's windows are drawn
+      // beside this one (see pageWindows) and slide in on the rebase.
+      function switchTo(id) {
+        const cur = panel.currentDesktop;
+        const ci = cur ? panel.deskIndexOf(cur.id) : -1;
+        const ti = panel.deskIndexOf(id);
+        const target = root.safeWorkspaceId(id);
+        if (ci < 0 || ti < 0 || ci === ti || target === "")
           return;
-        root.slidePendingDir = dir;
-        root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })",
-                      "workspace " + target);
+        panel.transitFrom = cur.id;
+        panel.transitDesk = id;
+        root.slidePendingDir = ti - ci;
+        root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })", "workspace " + target);
       }
 
       function cycleWindow() {
