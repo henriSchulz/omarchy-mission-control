@@ -1179,6 +1179,9 @@ Item {
             // from the first frame); the strip only folds to names when
             // there are several.
             panel.stripExpanded = panel.slotIds.length <= 1;
+            // A FrameAnimation does not run in a hidden window, so the fold
+            // ordered on the last close never happened: snap it now.
+            stripOpen.snap(stripOpen.to);
             if (panel.capturesReady) panel.revealed = true;
             else revealTimeout.restart();
           } else {
@@ -2933,14 +2936,31 @@ Item {
               HUi.SpringValue { id: tX; to: win.slot.x; preset: Motion.smooth; epsilon: 0.5 }
               HUi.SpringValue { id: tY; to: win.slot.y; preset: Motion.smooth; epsilon: 0.5 }
               HUi.SpringValue { id: tS; to: win.slot.s; preset: Motion.smooth }
+              // Every spring here is a FrameAnimation, and a hidden window
+              // renders no frames: a target that moved while the overview was
+              // hidden (a window resized, the strip folding on close, a Quick
+              // Look interrupted) leaves the spring stuck at its old value
+              // until the next open -- when it then glides from there, which
+              // read as the windows jumping off towards a corner at the start
+              // of a swipe. So: snapped on open, and snapped on every layout
+              // change until the overview has settled. Only a settled
+              // overview glides (the strip unfolding, a mode switch, a drag).
               function snapTarget() {
                 tX.snap(tX.to);
                 tY.snap(tY.to);
                 tS.snap(tS.to);
+                peekT.snap(peekT.to);
+                dX.snap(dX.to);
+                dY.snap(dY.to);
+                dS.snap(dS.to);
               }
               Connections {
                 target: root
                 function onShownChanged() { if (root.shown) win.snapTarget() }
+              }
+              Connections {
+                target: panel
+                function onLayoutChanged() { if (!root.settled) win.snapTarget() }
               }
               readonly property real targetX: tX.value
               readonly property real targetY: tY.value
