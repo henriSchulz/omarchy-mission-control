@@ -368,3 +368,26 @@ as good as the code it was measured against. The `Image` had been switched to
 `asynchronous: true` for safety and the "synchronous on purpose" note above it
 was never updated, so the 341 ms it quoted had stopped being true long before
 anyone reasoned from it — including me.
+
+## 13. Test it on a headless output, not on the user's screen
+
+The overlay takes exclusive keyboard focus and covers every monitor, so opening
+it to look at it interrupts whoever is at the machine. `tests/harness.sh` runs
+the plugin in a Quickshell instance of its own with
+`MISSION_CONTROL_TEST_SCREEN=HEADLESS-1`: the plugin then builds its panel for
+that output only and asks for no keyboard focus. `hyprctl output create headless
+HEADLESS-1` gives it an output, `hl.exec_cmd('foot', { workspace = '<n> silent'
+})` puts windows on it, `grim -o HEADLESS-1` captures what the overlay drew
+(layer surfaces are composited on a headless output; windows are not, but the
+overlay's captures of them are). Two traps found on the way: `hyprctl output
+create` interprets a window rule's `move` relative to the monitor, so a window
+started before the output existed lands off-screen; and a headless output does
+not survive a shell restart, taking its workspace (and the test windows) back to
+the real monitor.
+
+## 14. A working copy on tmpfs is gone after a reboot
+
+The first pass at 1.3.0 was edited and tested in a tmpfs scratch directory and
+lost to a reboot before it was merged. Keep the working copy on disk
+(`~/.cache`), and the base it was branched from next to it for a three-way
+merge if the live file moves meanwhile.

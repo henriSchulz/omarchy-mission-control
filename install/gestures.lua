@@ -2,8 +2,10 @@
 --
 -- The overview follows the fingers: a vertical swipe streams its motion to the
 -- plugin, which moves the windows as you swipe and, on release, settles open or
--- closed depending on how far and how fast you went. Swipe up opens, swipe down
--- closes, and you can change your mind mid-swipe.
+-- closed depending on how far and how fast you went. From the desktop, up
+-- opens Mission Control and down opens App Exposé of the app you are in (as
+-- in macOS); the opposite direction closes, and you can change your mind
+-- mid-swipe.
 --
 -- How: Hyprland (0.56+) accepts a table of start/update/end callbacks as a
 -- gesture action. Each callback emits a custom event on Hyprland's event socket

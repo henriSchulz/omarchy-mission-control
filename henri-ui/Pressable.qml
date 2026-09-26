@@ -12,7 +12,13 @@ Item {
 
   property color tint: Color.foreground        // hover/press fills are this color at low alpha
   property bool prominent: false               // accent-filled (primary action)
+  // Destructive primary: the filled action is red instead of accent, the way
+  // macOS marks the button that deletes something. Only meaningful together
+  // with `prominent` or `selected`.
+  property bool danger: false
   property bool selected: false                // accent fill, e.g. current menu entry
+  // The colour a filled state is filled with.
+  readonly property color primaryColor: danger ? Color.urgent : Color.accent
   property bool showFill: true                 // false: highlight comes from elsewhere (HUi.Highlight)
   property bool pressScaleEnabled: true
   property real radius: Style.space(Motion.radiusControl)
@@ -21,7 +27,7 @@ Item {
   readonly property bool hovered: hover.hovered
   readonly property bool pressed: tap.pressed || keyPressed
   property bool keyPressed: false
-  readonly property color contentColor: (prominent || selected) ? Motion.onColor(Color.accent) : tint
+  readonly property color contentColor: (prominent || selected) ? Motion.onColor(primaryColor) : tint
 
   signal clicked()
   signal secondaryClicked()
@@ -35,7 +41,7 @@ Item {
 
   function fillColor() {
     if (prominent || selected) {
-      var a = Color.accent
+      var a = root.primaryColor
       return pressed ? Qt.darker(a, 1.12) : hovered && prominent ? Qt.lighter(a, 1.08) : a
     }
     if (!showFill) return Util.alpha(tint, 0)
@@ -63,7 +69,7 @@ Item {
     radius: root.radius + Style.space(Motion.focusRing)
     color: "transparent"
     border.width: Style.space(Motion.focusRing)
-    border.color: Util.alpha(Color.accent, 0.6)
+    border.color: Util.alpha(root.primaryColor, 0.6)
     opacity: root.activeFocus && root.focusReason !== Qt.MouseFocusReason ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: Motion.fast } }
   }

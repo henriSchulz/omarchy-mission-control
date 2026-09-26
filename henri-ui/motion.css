@@ -30,6 +30,7 @@
   --radius-control: 8px;
   --radius-row: 6px;
   --radius-chip: 5px;
+  --radius-pill: 999px;   /* capsules: toolbar clusters, segmented controls */
 
   --press-scale: 0.97;
   --lift-scale: 1.05;      /* dragged item while held (reorder) */

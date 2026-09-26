@@ -60,10 +60,75 @@ Item {
   // open" and tried to close something already closed.
   property bool opened: false
 
-  // Called by the shell on summon. The payload is accepted and ignored -- there
-  // is only one thing this plugin does -- but the signature is part of the
-  // contract, so keep it.
+  // --- modes ----------------------------------------------------------------
+  // "mission": the Spaces strip and the current desktop's windows (F8, four
+  //            fingers up).
+  // "app":     App Exposé -- one app's windows from every desktop of this
+  //            monitor, packed side by side, minimized ones in a smaller row
+  //            underneath; no strip (SHIFT+F8, four fingers down). Tab moves
+  //            on to the next app.
+  // "desktop": Show Desktop -- every window slides out to the nearest screen
+  //            edge, leaving a sliver, so the wallpaper is clear (CTRL+F8).
+  property string mode: "mission"
+  readonly property bool missionMode: root.mode === "mission"
+  readonly property bool appMode: root.mode === "app"
+  readonly property bool desktopMode: root.mode === "desktop"
+  // App Exposé: the app id (Wayland class) being shown.
+  property string appClass: ""
+
+  // Desktops added with the strip's "+" that Hyprland has not created yet: it
+  // only creates a workspace once something lands on it, so until then (and
+  // again whenever one runs empty) the desktop exists only here. Kept in
+  // memory on purpose -- this plugin writes no state anywhere, see README.
+  // [{ id, monitor }]
+  property var extraDesktops: []
+
+  // Testing hook: with MISSION_CONTROL_TEST_SCREEN=<output> a standalone
+  // instance builds its overlay on that output only and never takes the
+  // keyboard, so it can be exercised on a headless output while the real shell
+  // and the user's screen are untouched. Empty in the shell.
+  readonly property string testScreen: String(Quickshell.env("MISSION_CONTROL_TEST_SCREEN") || "")
+
+  function validMode(value) {
+    const m = String(value || "");
+    return m === "app" || m === "desktop" ? m : "mission";
+  }
+
+  // The app id of the focused window, for App Exposé; the most recently used
+  // window when nothing is focused (an empty desktop, a layer had the focus).
+  function activeAppClass() {
+    const tls = Hyprland.toplevels.values || [];
+    let best = null;
+    for (let i = 0; i < tls.length; i++) {
+      const t = tls[i];
+      const o = t.lastIpcObject;
+      if (!o || o.mapped === false || o.hidden === true)
+        continue;
+      if (t.activated)
+        return String(o["class"] || "").slice(0, root.maxIconNameLength);
+      if (!best || (o.focusHistoryID || 0) < (best.lastIpcObject.focusHistoryID || 0))
+        best = t;
+    }
+    return best ? String(best.lastIpcObject["class"] || "").slice(0, root.maxIconNameLength) : "";
+  }
+
+  // Called by the shell on summon. The payload picks the mode:
+  //   {}                        Mission Control
+  //   {"mode":"app"}            App Exposé of the active app
+  //   {"mode":"app","app":"…"}  App Exposé of that app id
+  //   {"mode":"desktop"}        Show Desktop
+  // Summoned again while up in another mode, the overview changes mode in
+  // place: the windows glide to their new places instead of closing and
+  // reopening.
   function open(payloadJson) {
+    let payload = {};
+    try { payload = JSON.parse(String(payloadJson || "{}")) || {}; } catch (e) { payload = {}; }
+    const m = root.validMode(payload.mode);
+    if (m === "app") {
+      const wanted = String(payload.app || "").slice(0, root.maxIconNameLength);
+      root.appClass = wanted.length > 0 ? wanted : root.activeAppClass();
+    }
+    root.mode = m;
     // The background may have changed since the last open.
     root.refreshWallpaper()
     root.setShown(true)
@@ -75,9 +140,22 @@ Item {
     root.setShown(false)
   }
 
-  function toggle() {
-    if (root.opened) root.dismiss()
-    else root.open("{}")
+  // The keys: the same mode again closes, another mode switches in place.
+  function toggle(wanted) {
+    const m = root.validMode(wanted);
+    if (root.opened && root.mode === m) {
+      root.dismiss();
+      return;
+    }
+    root.summon(JSON.stringify({ mode: m }));
+  }
+
+  // Open through the shell, so its open-plugin bookkeeping matches ours.
+  function summon(payloadJson) {
+    if (root.shell && typeof root.shell.summon === "function")
+      root.shell.summon((root.manifest && root.manifest.id) || "henri.missioncontrol", payloadJson);
+    else
+      root.open(payloadJson);
   }
 
   // Closing on our own initiative -- Escape, a click on the backdrop, picking a
@@ -248,10 +326,22 @@ Item {
   onContentVisibleChanged: {
     if (root.contentVisible) {
       contentFade.stop();
-      root.contentOpacity = 1;
+      if (!contentFadeIn.running)
+        root.contentOpacity = 1;
     } else {
+      contentFadeIn.stop();
       contentFade.start();
     }
+  }
+  // Reduce Motion only: the way in is a crossfade too.
+  NumberAnimation {
+    id: contentFadeIn
+    target: root
+    property: "contentOpacity"
+    to: 1
+    duration: Motion.base
+    easing.type: Easing.BezierSpline
+    easing.bezierCurve: Motion.easeOut
   }
 
   // The Spaces strip slides in on open and then STAYS PUT until the surface is
@@ -331,6 +421,15 @@ Item {
 
   function animateProgress(to) {
     progressAnim.stop();
+    // Reduce Motion: nothing shrinks or slides. The windows are already in
+    // place and the surface crossfades -- see the fades in setShown.
+    if (Motion.reduceMotion) {
+      progressSpring.stop();
+      root.springVelocity = 0;
+      root.progress = to;
+      root.progressAnimDuration = 0;
+      return;
+    }
     const dist = Math.abs(to - root.progress);
     if (dist < 0.001 && !progressSpring.running) {
       root.progress = to;
@@ -534,7 +633,8 @@ Item {
 
   function handleSlide(phase, value, time) {
     if (phase === "start") {
-      if (!root.opened)
+      // Only Mission Control has desktops side by side to slide between.
+      if (!root.opened || !root.missionMode)
         return;
       root.slideTracking = true;
       slideWatchdog.restart();
@@ -620,6 +720,17 @@ Item {
       if (event.name !== "custom")
         return;
       const data = String(event.data || "");
+      // The keys, as Hyprland events straight from the binds (bindings.lua):
+      //   "mission-control toggle [mission|app|desktop]"   "mission-control hide"
+      // No process per key press, so F8 is on screen the frame it is pressed.
+      if (data.startsWith("mission-control ") && data.length <= 64) {
+        const words = data.slice("mission-control ".length).trim().split(/\s+/);
+        if (words[0] === "toggle")
+          root.toggle(words[1]);
+        else if (words[0] === "hide" && root.opened)
+          root.dismiss();
+        return;
+      }
       const sideways = data.startsWith("mission-control-hswipe:");
       if ((!sideways && !data.startsWith("mission-control-gesture:")) || data.length > 96)
         return;
@@ -654,6 +765,13 @@ Item {
       root.trackLastTime = time;
       root.contentVisible = true;
       if (!root.shown) {
+        // The direction picks the mode: up is Mission Control, down is App
+        // Exposé (macOS: three or four fingers up / down). Hyprland delivers
+        // the first movement with the start; a start without movement yet
+        // waits for the first update.
+        root.gestureUndecided = value === 0;
+        if (value !== 0)
+          root.gestureMode(value);
         root.refreshWallpaper();
         Hyprland.refreshMonitors();
         Hyprland.refreshWorkspaces();
@@ -668,8 +786,11 @@ Item {
         root.handleGesture("update", value, time);
     } else if (phase === "update" && root.tracking) {
       trackWatchdog.restart();
-      // Swiping up is negative y; up opens.
-      const step = -value / root.gestureDistance;
+      if (root.gestureUndecided && value !== 0)
+        root.gestureMode(value);
+      // Swiping up is negative y. Up opens Mission Control; in App Exposé it
+      // is the other way round, down opens and up closes.
+      const step = (root.appMode ? value : -value) / root.gestureDistance;
       root.trackTravel += step;
       const dt = time - root.trackLastTime;
       if (dt > 0) {
@@ -694,16 +815,24 @@ Item {
       if (Math.abs(root.trackVelocity) > 0.002)
         open = root.trackVelocity > 0;
       root.releasing = true;
-      if (open) {
-        // Through the shell, so its open-plugin bookkeeping matches.
-        if (root.shell && typeof root.shell.summon === "function")
-          root.shell.summon((root.manifest && root.manifest.id) || "henri.missioncontrol", "{}");
-        else
-          root.open("{}");
-      } else {
+      root.gestureUndecided = false;
+      if (open)
+        root.summon(JSON.stringify({ mode: root.mode, app: root.appClass }));
+      else
         root.dismiss();
-      }
       root.releasing = false;
+    }
+  }
+
+  // A swipe that started with the overview hidden and has not moved yet.
+  property bool gestureUndecided: false
+  function gestureMode(value) {
+    root.gestureUndecided = false;
+    if (value > 0) {
+      root.mode = "app";
+      root.appClass = root.activeAppClass();
+    } else {
+      root.mode = "mission";
     }
   }
   // Windows have arrived. Expensive work (live capture of every other desktop)
@@ -785,6 +914,12 @@ Item {
       if (!decoProbe.running) decoProbe.running = true;
       root.showSelection = false;
       root.contentVisible = true;
+      // Reduce Motion: the surface fades in over the desktop instead of the
+      // windows shrinking out of it.
+      if (Motion.reduceMotion) {
+        root.contentOpacity = 0;
+        contentFadeIn.restart();
+      }
       root.shown = true;
       // The shrink is started by the window itself, once its surface is
       // actually up -- see onBackingWindowVisibleChanged below. This is only a
@@ -989,7 +1124,8 @@ Item {
     // hands out a nameless placeholder for a beat. Building a panel for it
     // would instantiate every thumbnail below against windows that have no
     // monitor, and Hyprland 0.56 crashes on that capture request.
-    model: Quickshell.screens.filter(s => s && s.name !== "")
+    model: Quickshell.screens.filter(s => s && s.name !== ""
+                                          && (root.testScreen === "" || String(s.name) === root.testScreen))
 
     PanelWindow {
       id: panel
@@ -1039,6 +1175,12 @@ Item {
             panel.dragTile = -1;
             panel.dragSlot = -1;
             panel.resetTileOrder();
+            // Back to the way macOS opens: strip folded, nothing peeked.
+            panel.stripExpanded = false;
+            panel.peek = -1;
+            panel.altHeld = false;
+            panel.dragWindow = -1;
+            panel.dropSlot = -2;
           }
         }
       }
@@ -1114,7 +1256,7 @@ Item {
       // so the arrow keys work without a click first.
       WlrLayershell.namespace: "mission-control"
       WlrLayershell.layer: WlrLayer.Overlay
-      WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+      WlrLayershell.keyboardFocus: root.testScreen !== "" ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
       exclusionMode: ExclusionMode.Ignore
 
       // --- which monitor are we on -----------------------------------------
@@ -1149,6 +1291,7 @@ Item {
       }
       readonly property var desktopsLive: {
         const out = [];
+        const seen = {};
         const all = Hyprland.workspaces.values || [];
         for (let i = 0; i < all.length; i++) {
           const ws = all[i];
@@ -1157,9 +1300,151 @@ Item {
           if (panel.hyprMonitor && ws.monitor && ws.monitor.id !== panel.hyprMonitor.id)
             continue;
           out.push(ws);
+          seen[ws.id] = true;
+        }
+        // Desktops added with "+" that Hyprland has nothing on (yet, or any
+        // more): empty desktops until they are removed with their "x".
+        const extra = root.extraDesktops;
+        for (let i = 0; i < extra.length; i++) {
+          if (seen[extra[i].id] || String(extra[i].monitor) !== String(panel.screen.name))
+            continue;
+          out.push(panel.placeholderDesk(extra[i].id));
         }
         out.sort((a, b) => a.id - b.id);
         return out;
+      }
+
+      // Stand-ins for desktops Hyprland does not have. Cached so the same id
+      // gives the same object and the sameList checks above keep working.
+      property var placeholders: ({})
+      function placeholderDesk(id) {
+        if (!panel.placeholders[id])
+          panel.placeholders[id] = { id: id, name: String(id), focused: false, toplevels: null, placeholder: true };
+        return panel.placeholders[id];
+      }
+
+      function isExtra(id) {
+        const extra = root.extraDesktops;
+        for (let i = 0; i < extra.length; i++)
+          if (extra[i].id === id && String(extra[i].monitor) === String(panel.screen.name))
+            return true;
+        return false;
+      }
+
+      // --- adding and removing desktops -------------------------------------
+      // "+" at the end of the strip adds a desktop after the last one; up to
+      // 16 per display, as in macOS. Hyprland creates the workspace itself
+      // once a window lands on it or it is switched to, so until then it is
+      // one of root.extraDesktops.
+      readonly property int maxDesktops: 16
+      function addDesktop() {
+        if (panel.slotIds.length >= panel.maxDesktops || !Hyprland.usingLua)
+          return -1;
+        let max = 0;
+        const all = Hyprland.workspaces.values || [];
+        for (let i = 0; i < all.length; i++)
+          if (all[i].id > max)
+            max = all[i].id;
+        const extra = root.extraDesktops;
+        for (let i = 0; i < extra.length; i++)
+          if (extra[i].id > max)
+            max = extra[i].id;
+        const id = max + 1;
+        root.extraDesktops = extra.concat([{ id: id, monitor: String(panel.screen.name) }]);
+        return id;
+      }
+
+      // The "x" on a thumbnail. Its windows go to the desktop on its left (or
+      // the right, for the first one), and every desktop after it moves down a
+      // number so there is no hole -- macOS renumbers the same way. Same Lua
+      // batch as a reorder: each step's target has just been emptied.
+      property bool removePending: false
+      function removeDesktop(id) {
+        if (!Hyprland.usingLua || panel.reorderPending)
+          return;
+        const ids = panel.slotIds.map(v => root.safeWorkspaceId(v));
+        const idx = panel.slotIds.indexOf(id);
+        if (idx < 0 || ids.length < 2 || ids.indexOf("") >= 0)
+          return;
+        const content = panel.slotContent();
+        const steps = [];
+        const move = (slot, target) => {
+          for (let i = 0; i < content[slot].length; i++)
+            steps.push("mv(\"" + content[slot][i] + "\", \"" + target + "\")");
+        };
+        move(idx, ids[idx > 0 ? idx - 1 : 1]);
+        for (let s = idx + 1; s < ids.length; s++)
+          move(s, ids[s - 1]);
+        // Stay where you were: follow the current desktop to its new number,
+        // or, if it is the one being removed, go where its windows went.
+        const cur = panel.currentDesktop ? panel.slotIds.indexOf(panel.currentDesktop.id) : -1;
+        let focusTo = "";
+        if (cur === idx)
+          focusTo = ids[idx > 0 ? idx - 1 : 1];
+        else if (cur > idx)
+          focusTo = ids[cur - 1];
+        if (focusTo !== "")
+          steps.push("pcall(hl.dispatch, hl.dsp.focus({ workspace = \"" + focusTo + "\" }))");
+
+        // The desktops only this plugin knows about move down with the rest.
+        const removed = panel.slotIds[idx];
+        const last = panel.slotIds[panel.slotIds.length - 1];
+        const mon = String(panel.screen.name);
+        const kept = [];
+        const extra = root.extraDesktops;
+        for (let i = 0; i < extra.length; i++) {
+          const e = extra[i];
+          if (String(e.monitor) !== mon || e.id < removed) { kept.push(e); continue; }
+          if (e.id === removed || e.id === last) continue;
+          kept.push({ id: e.id - 1, monitor: e.monitor });
+        }
+        root.extraDesktops = kept;
+
+        // The focus change is a renumbering, not a switch: no sideways slide.
+        panel.removePending = true;
+        removeSettle.restart();
+        if (steps.length === 0)
+          return;
+        root.dispatch("function() local function mv(a, w) pcall(hl.dispatch, hl.dsp.window.move({ workspace = w, follow = false, window = \"address:\" .. a })) end "
+                      + steps.join(" ") + " end", "");
+      }
+      Timer {
+        id: removeSettle
+        interval: 400
+        onTriggered: panel.removePending = false
+      }
+
+      // Every window of each slot, in reading order, as dispatch-safe
+      // addresses: each lands on an empty workspace below, and inserting them
+      // left to right, top to bottom rebuilds the tiling about as it was.
+      function slotContent() {
+        const content = [];
+        for (let s = 0; s < panel.slotIds.length; s++) {
+          const desk = panel.deskById(panel.slotIds[s]);
+          const tls = desk && desk.toplevels ? (desk.toplevels.values || []) : [];
+          const wins = [];
+          for (let i = 0; i < tls.length; i++) {
+            const addr = root.safeAddress(tls[i].address);
+            const o = tls[i].lastIpcObject;
+            if (addr !== "")
+              wins.push({ addr: addr, x: o && o.at ? o.at[0] : 0, y: o && o.at ? o.at[1] : 0 });
+          }
+          wins.sort((a, b) => (a.x - b.x) || (a.y - b.y));
+          content.push(wins.map(w => w.addr));
+        }
+        return content;
+      }
+
+      // A window dropped on a desktop thumbnail, or on "+" (a new desktop).
+      function moveWindowToSlot(address, slot) {
+        if (!Hyprland.usingLua)
+          return;
+        const addr = root.safeAddress(address);
+        let id = slot === -1 ? panel.addDesktop() : (panel.slotIds[slot] ?? -1);
+        const target = root.safeWorkspaceId(id);
+        if (addr === "" || target === "" || id < 0)
+          return;
+        root.dispatch("hl.dsp.window.move({ workspace = \"" + target + "\", follow = false, window = \"address:" + addr + "\" })", "");
       }
 
       Component.onCompleted: {
@@ -1218,7 +1503,7 @@ Item {
         for (let i = 0; i < all.length; i++)
           if (all[i].id === id)
             return all[i];
-        return null;
+        return panel.isExtra(id) ? panel.placeholderDesk(id) : null;
       }
 
       readonly property real stripPitch: panel.stripTileW + panel.stripGap
@@ -1394,7 +1679,67 @@ Item {
       // order puts the one you are coming back to in the top-left.
       property var windows: []
       onWindowsLiveChanged: if (!panel.reorderPending && !root.sameList(panel.windows, panel.windowsLive)) panel.windows = panel.windowsLive
-      readonly property var windowsLive: panel.windowsOf(panel.currentDesktop)
+      // App Exposé shows one app from every desktop; the other modes the
+      // current desktop.
+      readonly property var windowsLive: root.appMode ? panel.appWindows(root.appClass)
+                                                     : panel.windowsOf(panel.currentDesktop)
+
+      // Every window of one app on this monitor, most recently used first,
+      // wherever it is -- other desktops and the dock's special:minimized
+      // workspace included (those go in the smaller row underneath).
+      function appWindows(cls) {
+        const out = [];
+        if (!cls)
+          return out;
+        const tls = Hyprland.toplevels.values || [];
+        for (let i = 0; i < tls.length; i++) {
+          const t = tls[i];
+          const o = t.lastIpcObject;
+          if (!t.wayland || !o || o.mapped === false || o.hidden === true)
+            continue;
+          if (String(o["class"] || "") !== cls)
+            continue;
+          if (panel.hyprMonitor && t.monitor && t.monitor.id !== panel.hyprMonitor.id)
+            continue;
+          out.push(t);
+        }
+        out.sort((a, b) => (a.lastIpcObject.focusHistoryID || 0) - (b.lastIpcObject.focusHistoryID || 0));
+        return out;
+      }
+
+      // App ids on this monitor, most recently used first, for Tab in App
+      // Exposé.
+      function appClasses() {
+        const seen = {};
+        const out = [];
+        const tls = Hyprland.toplevels.values || [];
+        const sorted = tls.slice().filter(t => t.wayland && t.lastIpcObject && t.lastIpcObject.mapped !== false)
+            .sort((a, b) => (a.lastIpcObject.focusHistoryID || 0) - (b.lastIpcObject.focusHistoryID || 0));
+        for (let i = 0; i < sorted.length; i++) {
+          const t = sorted[i];
+          if (panel.hyprMonitor && t.monitor && t.monitor.id !== panel.hyprMonitor.id)
+            continue;
+          const cls = String(t.lastIpcObject["class"] || "");
+          if (cls === "" || seen[cls])
+            continue;
+          seen[cls] = true;
+          out.push(cls);
+        }
+        return out;
+      }
+
+      function nextApp(dir) {
+        const classes = panel.appClasses();
+        if (classes.length === 0)
+          return;
+        const i = classes.indexOf(root.appClass);
+        root.appClass = classes[((i < 0 ? 0 : i + dir) + classes.length) % classes.length];
+      }
+
+      // A window parked by the dock: on a special workspace, not a desktop.
+      function isMinimized(t) {
+        return !!(t && t.workspace && t.workspace.id < 0);
+      }
 
       function windowsOf(desk) {
         const out = [];
@@ -1446,7 +1791,7 @@ Item {
         const old = panel.deskIndex;
         panel.deskIndex = i;
         // Following a desktop's windows to their new slot is not a switch.
-        if (panel.reorderPending)
+        if (panel.reorderPending || panel.removePending)
           return;
         if (!panel.slideOwner || !root.shown || old < 0 || i < 0 || i === old)
           return;
@@ -1464,7 +1809,19 @@ Item {
       // strip is about a sixth of the screen, and the thumbnails in it about
       // two thirds of the strip, leaving room for a label underneath.
       readonly property real uiScale: panel.width / 1920
-      readonly property real stripH: Math.round(panel.height * 0.155)
+      // The strip opens folded, showing only the desktops' names, and unfolds
+      // into thumbnails when the pointer touches it or a window is dragged
+      // towards it (macOS). Once unfolded it stays so until the overview
+      // closes. The windows underneath move down a little to make room.
+      property bool stripExpanded: false
+      HUi.SpringValue {
+        id: stripOpen
+        to: panel.stripExpanded ? 1 : 0
+        preset: Motion.smooth
+      }
+      readonly property real stripFullH: Math.round(panel.height * 0.155)
+      readonly property real stripCollapsedH: Math.round(panel.stripLabelBand + panel.stripPad * 2)
+      readonly property real stripH: root.lerp(panel.stripCollapsedH, panel.stripFullH, stripOpen.value)
       readonly property real stripPad: Math.round(12 * uiScale)
       readonly property real stripGap: Math.round(22 * uiScale)
       readonly property int stripLabelSize: Math.max(9, Math.round(15 * uiScale))
@@ -1475,10 +1832,15 @@ Item {
       // desktops it is the width, with two it is the strip height.
       // Off the held slots, so a reorder's burst of events cannot resize them.
       readonly property int deskCount: Math.max(1, panel.slotIds.length)
+      // 86% of the width for the row, leaving the right edge to the "+".
       readonly property real stripTileH: Math.min(
-          stripH - stripLabelBand - stripPad * 2,
-          ((panel.width * 0.92) - (deskCount - 1) * stripGap) / deskCount * (panel.height / panel.width))
+          stripFullH - stripLabelBand - stripPad * 2,
+          ((panel.width * 0.86) - (deskCount - 1) * stripGap) / deskCount * (panel.height / panel.width))
       readonly property real stripTileW: stripTileH * panel.width / panel.height
+      // The "+" is half a thumbnail wide, at the right edge (macOS).
+      readonly property real plusW: Math.round(panel.stripTileW * 0.5)
+      readonly property real plusX: panel.width - panel.stripPad * 2 - panel.plusW
+      readonly property bool plusVisible: panel.slotIds.length < panel.maxDesktops && Hyprland.usingLua
 
       // The exposé is NOT a grid of equal cells. macOS shrinks the whole
       // desktop by one factor and leaves every window where it actually is, at
@@ -1500,9 +1862,18 @@ Item {
       readonly property real exposeGapBottom: Math.round(panel.height * 0.10)
       readonly property real exposeGapSide: Math.round(panel.width * 0.015)
       readonly property real exposeAreaX: exposeGapSide
-      readonly property real exposeAreaY: stripH + exposeGapTop
+      // Without the strip (App Exposé, Show Desktop) the area starts under
+      // the bar.
+      readonly property real exposeAreaY: (root.missionMode ? stripH : panel.barBand) + exposeGapTop
       readonly property real exposeAreaW: panel.width - exposeGapSide * 2
       readonly property real exposeAreaH: panel.height - exposeAreaY - exposeGapBottom
+
+      // Quick Look (Space): the selected window grows to fill most of the
+      // exposé area.
+      readonly property real peekAreaX: exposeGapSide * 3
+      readonly property real peekAreaY: exposeAreaY - exposeGapTop * 0.5
+      readonly property real peekAreaW: panel.width - peekAreaX * 2
+      readonly property real peekAreaH: panel.height - peekAreaY - exposeGapBottom * 0.5
 
       // Scale off the monitor's *usable* area, not the whole monitor. The bar
       // and the window gap mean a tiled window starts ~100px down; feeding the
@@ -1550,6 +1921,150 @@ Item {
       readonly property real originX: origin.x
       readonly property real originY: origin.y
 
+      // --- where each window goes ---------------------------------------------
+      // One entry per panel.windows: { x, y, s, onScreen, minimized } -- the
+      // overview rect's top-left and scale in this monitor's logical pixels.
+      // One binding for all of them, so the layout is consistent whatever
+      // changes it (mode, strip, a window closing).
+      readonly property var layout: {
+        const wins = panel.windows;
+        if (root.appMode)
+          return panel.packLayout(wins);
+        if (root.desktopMode)
+          return panel.edgeLayout(wins);
+        const o = panel.originFor(wins);
+        const out = [];
+        for (let i = 0; i < wins.length; i++) {
+          const ipc = wins[i].lastIpcObject;
+          const at = ipc && ipc.at ? ipc.at : [0, 0];
+          out.push({ x: o.x + (at[0] - panel.monX) * panel.shrink,
+                     y: o.y + (at[1] - panel.monY) * panel.shrink,
+                     s: panel.shrink, onScreen: true, minimized: false });
+        }
+        return out;
+      }
+
+      function sizeOf(t) {
+        const o = t ? t.lastIpcObject : null;
+        return o && o.size ? [Math.max(1, o.size[0]), Math.max(1, o.size[1])] : [1, 1];
+      }
+
+      // App Exposé: windows from several desktops have no common desktop to
+      // shrink, so they are packed into rows -- most recent first, aspect
+      // ratios kept, never enlarged (macOS). The row count that gives the
+      // largest scale wins. Minimized windows go in their own, smaller row
+      // along the bottom.
+      function packLayout(wins) {
+        const out = new Array(wins.length);
+        const main = [], mini = [];
+        for (let i = 0; i < wins.length; i++)
+          (panel.isMinimized(wins[i]) ? mini : main).push(i);
+        const gap = Math.round(28 * panel.uiScale);
+        const bandH = mini.length > 0 ? Math.round(panel.exposeAreaH * 0.22) : 0;
+        const placed = panel.packInto(wins, main, panel.exposeAreaX, panel.exposeAreaY,
+                                      panel.exposeAreaW, panel.exposeAreaH - bandH, gap, 1);
+        for (let i = 0; i < placed.length; i++)
+          out[main[i]] = placed[i];
+        if (mini.length > 0) {
+          const row = panel.packInto(wins, mini, panel.exposeAreaX, panel.exposeAreaY + panel.exposeAreaH - bandH + gap,
+                                     panel.exposeAreaW, bandH - gap, gap, 0.6);
+          for (let i = 0; i < row.length; i++) {
+            row[i].minimized = true;
+            out[mini[i]] = row[i];
+          }
+        }
+        const cur = panel.currentDesktop;
+        for (let i = 0; i < wins.length; i++) {
+          if (!out[i])
+            out[i] = { x: panel.exposeAreaX, y: panel.exposeAreaY, s: 0.5, minimized: false };
+          const ws = wins[i].workspace;
+          out[i].onScreen = !!(cur && ws && ws.id === cur.id);
+        }
+        return out;
+      }
+
+      function packInto(wins, idx, ax, ay, aw, ah, gap, maxScale) {
+        const n = idx.length;
+        const out = [];
+        if (n === 0 || aw <= 0 || ah <= 0)
+          return out;
+        const sizes = idx.map(i => panel.sizeOf(wins[i]));
+        let best = null;
+        for (let rows = 1; rows <= n; rows++) {
+          const perRow = Math.ceil(n / rows);
+          const rowList = [];
+          for (let r = 0; r < rows; r++) {
+            const row = sizes.slice(r * perRow, (r + 1) * perRow);
+            if (row.length > 0)
+              rowList.push(row);
+          }
+          let s = maxScale;
+          let hSum = 0;
+          for (let r = 0; r < rowList.length; r++) {
+            let wSum = 0, hMax = 0;
+            for (let k = 0; k < rowList[r].length; k++) {
+              wSum += rowList[r][k][0];
+              hMax = Math.max(hMax, rowList[r][k][1]);
+            }
+            s = Math.min(s, (aw - (rowList[r].length - 1) * gap) / wSum);
+            hSum += hMax;
+          }
+          s = Math.min(s, (ah - (rowList.length - 1) * gap) / hSum);
+          if (!best || s > best.s)
+            best = { s: s, rows: rowList };
+        }
+        const s = Math.max(0.01, best.s);
+        let blockH = (best.rows.length - 1) * gap;
+        const rowH = [];
+        for (let r = 0; r < best.rows.length; r++) {
+          let hMax = 0;
+          for (let k = 0; k < best.rows[r].length; k++)
+            hMax = Math.max(hMax, best.rows[r][k][1] * s);
+          rowH.push(hMax);
+          blockH += hMax;
+        }
+        let y = ay + (ah - blockH) / 2;
+        for (let r = 0; r < best.rows.length; r++) {
+          const row = best.rows[r];
+          let rowW = (row.length - 1) * gap;
+          for (let k = 0; k < row.length; k++)
+            rowW += row[k][0] * s;
+          let x = ax + (aw - rowW) / 2;
+          for (let k = 0; k < row.length; k++) {
+            out.push({ x: Math.round(x), y: Math.round(y + (rowH[r] - row[k][1] * s) / 2), s: s, minimized: false });
+            x += row[k][0] * s + gap;
+          }
+          y += rowH[r] + gap;
+        }
+        return out;
+      }
+
+      // Show Desktop: every window slides out to whichever screen edge is
+      // nearest, leaving a sliver showing, so the wallpaper is clear.
+      readonly property real edgeSliver: Math.round(panel.width * 0.03)
+      function edgeLayout(wins) {
+        const out = [];
+        for (let i = 0; i < wins.length; i++) {
+          const ipc = wins[i].lastIpcObject;
+          const at = ipc && ipc.at ? ipc.at : [0, 0];
+          const size = panel.sizeOf(wins[i]);
+          const x = at[0] - panel.monX, y = at[1] - panel.monY;
+          const cx = x + size[0] / 2, cy = y + size[1] / 2;
+          const d = [cx, panel.monW - cx, cy, panel.monH - cy];
+          let edge = 0;
+          for (let k = 1; k < 4; k++)
+            if (d[k] < d[edge])
+              edge = k;
+          const e = { x: x, y: y, s: 1, onScreen: true, minimized: false };
+          if (edge === 0) e.x = -(size[0] - panel.edgeSliver);
+          else if (edge === 1) e.x = panel.monW - panel.edgeSliver;
+          else if (edge === 2) e.y = -(size[1] - panel.edgeSliver);
+          else e.y = panel.monH - panel.edgeSliver;
+          out.push(e);
+        }
+        return out;
+      }
+
       // Icon and title sizes come off the screen, not off the window, so every
       // label in the view is the same size -- measured at ~2.3% and ~0.85% of
       // the screen width in the macOS shot.
@@ -1573,11 +2088,15 @@ Item {
       // that direction rather than stepping through a grid. Distance is
       // weighted so a window that is roughly in line wins over one that is
       // nearer but far off to the side.
-      function centreOf(t) {
-        const o = t.lastIpcObject;
-        if (!o || !o.at || !o.size)
+      // Off the overview layout, not the real desktop: in App Exposé the
+      // windows come from several desktops and only their overview places
+      // are comparable.
+      function centreOf(i) {
+        const l = panel.layout[i];
+        const size = panel.sizeOf(panel.windows[i]);
+        if (!l)
           return { x: 0, y: 0 };
-        return { x: o.at[0] + o.size[0] / 2, y: o.at[1] + o.size[1] / 2 };
+        return { x: l.x + size[0] * l.s / 2, y: l.y + size[1] * l.s / 2 };
       }
 
       function move(dx, dy) {
@@ -1588,13 +2107,13 @@ Item {
           panel.selected = 0;
           return;
         }
-        const from = panel.centreOf(panel.windows[panel.selected]);
+        const from = panel.centreOf(panel.selected);
         let best = -1;
         let bestCost = Infinity;
         for (let i = 0; i < n; i++) {
           if (i === panel.selected)
             continue;
-          const to = panel.centreOf(panel.windows[i]);
+          const to = panel.centreOf(i);
           const along = (to.x - from.x) * dx + (to.y - from.y) * dy;
           if (along <= 0)
             continue;
@@ -1682,36 +2201,87 @@ Item {
         anchors.fill: parent
         color: "#0b0d14"
         // Grows with the shrink; a constant dim darkened the screen in one
-        // step the moment a swipe began.
-        opacity: 0.14 * Math.max(0, Math.min(1, root.progress))
+        // step the moment a swipe began. Show Desktop does not dim: the
+        // point of it is the desktop.
+        opacity: (root.desktopMode ? 0 : 0.14) * Math.max(0, Math.min(1, root.progress))
       }
 
       // Click anywhere that is not a window or a desktop to dismiss. A
       // TapHandler, not a MouseArea: a MouseArea grabs the press outright and
       // any handler on a sibling never sees the gesture.
       TapHandler {
-        onTapped: root.dismiss()
+        onTapped: {
+          if (panel.peek >= 0) panel.peek = -1;
+          else root.dismiss();
+        }
+      }
+
+      // Quick Look: index into panel.windows of the window shown large, -1
+      // for none. Space toggles it on the selection.
+      property int peek: -1
+      function togglePeek() {
+        if (panel.peek >= 0)
+          panel.peek = -1;
+        else if (panel.selected >= 0 && panel.selected < panel.windows.length && !root.desktopMode)
+          panel.peek = panel.selected;
+      }
+      // Option held: the "x" shows on every desktop thumbnail (macOS).
+      property bool altHeld: false
+
+      // A window being dragged (index into panel.windows, -1 for none) and
+      // where it would land: a strip slot, -1 for the "+", -2 for nowhere.
+      property int dragWindow: -1
+      property int dropSlot: -2
+      function dropSlotAt(x, y) {
+        if (!panel.stripExpanded || y > panel.stripH)
+          return -2;
+        if (panel.plusVisible && x >= panel.plusX - panel.stripGap / 2)
+          return -1;
+        const slot = Math.floor((x - panel.stripRowX + panel.stripGap / 2) / panel.stripPitch);
+        if (slot < 0 || slot >= panel.slotIds.length)
+          return -2;
+        // Its own desktop is not a destination.
+        if (panel.currentDesktop && panel.slotIds[slot] === panel.currentDesktop.id)
+          return -2;
+        return slot;
       }
 
       Item {
         anchors.fill: parent
         focus: true
-        Keys.onEscapePressed: root.dismiss()
+        Keys.onEscapePressed: {
+          // On a Quick Look, Escape first puts the window back (drill-in rule:
+          // Escape goes one level up before it closes).
+          if (panel.peek >= 0) panel.peek = -1;
+          else root.dismiss();
+        }
         // Left/right walk the Spaces strip and actually switch desktop, without
         // closing -- the exposé below follows, so you can flick through the
         // desktops and only then pick a window. Up/down move between the
-        // windows of whichever desktop you landed on.
-        Keys.onLeftPressed: panel.stepDesktop(-1)
-        Keys.onRightPressed: panel.stepDesktop(1)
+        // windows of whichever desktop you landed on. App Exposé has no strip,
+        // so there left/right move between its windows instead.
+        Keys.onLeftPressed: { if (root.missionMode) panel.stepDesktop(-1); else { root.showSelection = true; panel.move(-1, 0) } }
+        Keys.onRightPressed: { if (root.missionMode) panel.stepDesktop(1); else { root.showSelection = true; panel.move(1, 0) } }
         Keys.onUpPressed: { root.showSelection = true; panel.move(0, -1) }
         Keys.onDownPressed: { root.showSelection = true; panel.move(0, 1) }
-        Keys.onTabPressed: { root.showSelection = true; panel.cycleWindow() }
+        // Tab: the next window; in App Exposé the next app (macOS).
+        Keys.onTabPressed: { root.showSelection = true; if (root.appMode) panel.nextApp(1); else panel.cycleWindow() }
+        Keys.onBacktabPressed: { root.showSelection = true; if (root.appMode) panel.nextApp(-1); else panel.cycleWindow() }
+        Keys.onSpacePressed: { root.showSelection = true; panel.togglePeek() }
         Keys.onReturnPressed: panel.activateSelection()
         Keys.onEnterPressed: panel.activateSelection()
+        Keys.onReleased: event => {
+          if (event.key === Qt.Key_Alt) { panel.altHeld = false; event.accepted = true }
+        }
 
         // Keys.onPressed runs before the named handlers above, so this is where
         // anything that has to win over plain arrow navigation goes.
         Keys.onPressed: event => {
+          if (event.key === Qt.Key_Alt) {
+            panel.altHeld = true;
+            event.accepted = true;
+            return;
+          }
           // CTRL+DOWN closes, mirroring the CTRL+UP that opened it. There is a
           // Hyprland bind for this too -- a modifier pressed on a virtual
           // keyboard does not reliably reach a client through an
@@ -1724,7 +2294,7 @@ Item {
             return;
           }
           // Number keys jump straight to a desktop, like SUPER+n does normally.
-          if (event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+          if (root.missionMode && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const want = event.key - Qt.Key_0;
             for (let i = 0; i < panel.desktops.length; i++) {
               if (panel.desktops[i].id === want) {
@@ -1764,7 +2334,10 @@ Item {
 
       // Landing on another desktop starts its selection over; without this the
       // index left over from the previous desktop points at nothing.
-      onWindowsChanged: panel.selected = panel.windows.length > 0 ? 0 : -1
+      onWindowsChanged: {
+        panel.selected = panel.windows.length > 0 ? 0 : -1;
+        panel.peek = -1;
+      }
 
       function activateSelection() {
         if (panel.selected >= 0 && panel.selected < panel.windows.length)
@@ -1786,6 +2359,18 @@ Item {
         // shrinking.
 
         // --- Spaces strip ---------------------------------------------------
+        // Only Mission Control has the strip. A mode switch while up slides
+        // it in or out on its own spring; on open it rides the progress.
+        HUi.SpringValue {
+          id: stripIn
+          to: root.missionMode ? 1 : 0
+          preset: Motion.smooth
+        }
+        Connections {
+          target: root
+          function onShownChanged() { if (root.shown) stripIn.snap(stripIn.to) }
+        }
+
         Rectangle {
           id: strip
           width: parent.width
@@ -1793,8 +2378,10 @@ Item {
           // Slides down from off-screen as the desktop shrinks to make room for
           // it, which is where macOS puts the motion. Driven by stripProgress,
           // which holds it in place on a non-swipe close -- see stripHold.
-          y: root.lerp(-panel.stripH, 0, root.stripProgress)
-          opacity: root.stripProgress
+          readonly property real reveal: root.stripProgress * stripIn.value
+          y: root.lerp(-panel.stripH, 0, strip.reveal)
+          opacity: strip.reveal
+          visible: strip.reveal > 0.001
           color: Qt.rgba(1, 1, 1, 0.07)
 
           Rectangle {
@@ -1803,9 +2390,20 @@ Item {
             color: Util.alpha(panel.overlayInk, Motion.hairlineAlpha)
           }
 
-          // Top of the thumbnail row, centred in the strip as before.
+          // The pointer touching the strip unfolds it. Not before the windows
+          // have settled: while they are still shrinking the strip is sliding
+          // in under a stationary pointer, which is not a touch.
+          HoverHandler {
+            id: stripHover
+            onHoveredChanged: if (hovered && root.settled) panel.stripExpanded = true
+          }
+
+          // Top of the thumbnail row, centred in the unfolded strip.
           readonly property real rowY:
-              Math.round((panel.stripH - panel.stripTileH - panel.stripLabelBand) / 2)
+              Math.round((panel.stripFullH - panel.stripTileH - panel.stripLabelBand) / 2)
+          // Where the labels sit while the strip is folded: on their own,
+          // centred in the band.
+          readonly property real foldedLabelY: Math.round((panel.stripCollapsedH - panel.stripLabelBand) / 2)
 
           // Labels belong to the SLOTS, not to the thumbnails: a desktop's
           // number is its place, so dragging a thumbnail carries its windows
@@ -1821,7 +2419,9 @@ Item {
               readonly property var desk: panel.deskById(slotLabel.wsId)
               readonly property bool marked: panel.displayOrder[slotLabel.index] === panel.focusedTile
               x: panel.stripRowX + slotLabel.index * panel.stripPitch
-              y: strip.rowY + panel.stripTileH
+              // Folded: on their own in the band. Unfolding, they move down
+              // under the thumbnails growing out of them.
+              y: root.lerp(strip.foldedLabelY, strip.rowY + panel.stripTileH, stripOpen.value)
               width: panel.stripTileW
               height: panel.stripLabelBand
               horizontalAlignment: Text.AlignHCenter
@@ -1916,7 +2516,15 @@ Item {
               x: xSpring.value
               y: strip.rowY + ySpring.value
               z: deskCell.held || deskCell.landing ? 2 : 0
-              scale: liftSpring.value
+              // Folded away: the thumbnails grow out of their labels as the
+              // strip unfolds (macOS), so they scale up from the bottom.
+              transformOrigin: Item.Bottom
+              scale: liftSpring.value * root.lerp(0.6, 1, stripOpen.value)
+              opacity: stripOpen.value
+              visible: stripOpen.value > 0.001
+
+              // A window being dragged over this desktop: it stands out.
+              readonly property bool dropHover: panel.dragWindow >= 0 && panel.dropSlot === deskCell.shownSlot
 
               property var deskWindows: []
               // Held during a reorder -- the tile keeps showing what it showed
@@ -2012,7 +2620,9 @@ Item {
                       // shell start) fires one capture per window while the
                       // overlay is not even visible. Null tears the context
                       // down; `shown` flipping true creates it and captures.
-                      captureSource: root.shown ? modelData.wayland : null
+                      // Nor while the strip is folded: nothing of it shows,
+                      // and most opens never unfold it.
+                      captureSource: root.shown && panel.stripExpanded ? modelData.wayland : null
                       // Live, but only while shown. This plugin stays
                       // mounted, so an unconditional `live: true` would keep
                       // pulling frames of every window on every workspace
@@ -2033,7 +2643,7 @@ Item {
                       // just for us, and doing that for all desktops while
                       // the windows are moving is what dropped frames. The
                       // source above still takes one frame straight away.
-                      live: root.shown && root.settled
+                      live: root.shown && root.settled && panel.stripExpanded
                       paintCursor: false
                     }
                   }
@@ -2041,7 +2651,7 @@ Item {
                   Rectangle {
                     anchors.fill: parent
                     color: "#05060a"
-                    opacity: deskCell.isFocused ? 0.0 : (deskHover.hovered || deskCell.held ? 0.10 : 0.28)
+                    opacity: deskCell.isFocused ? 0.0 : (deskHover.hovered || deskCell.held || deskCell.dropHover ? 0.10 : 0.28)
                     Behavior on opacity {
                       NumberAnimation {
                         duration: deskHover.hovered ? Motion.instant : Motion.fast
@@ -2071,7 +2681,8 @@ Item {
                   radius: panel.thumbRadius
                   color: Util.alpha(panel.overlayInk, 0)
                   border.width: Math.max(1, Math.round(2 * panel.uiScale))
-                  border.color: deskCell.isFocused ? Util.alpha(panel.overlayInk, 0.96)
+                  border.color: deskCell.dropHover ? Color.accent
+                              : deskCell.isFocused ? Util.alpha(panel.overlayInk, 0.96)
                               : deskHover.hovered || deskCell.held ? Util.alpha(panel.overlayInk, 0.55)
                               : Util.alpha(panel.overlayInk, 0.16)
                   Behavior on border.color {
@@ -2079,6 +2690,59 @@ Item {
                       duration: deskHover.hovered ? Motion.instant : Motion.fast
                       easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                     }
+                  }
+                }
+
+                // The "x" that removes this desktop: top-left, on hover, or on
+                // every thumbnail while Option is held (macOS). Never on the
+                // last remaining desktop. A MouseArea, so the press stops here
+                // and does not also switch to the desktop underneath.
+                Rectangle {
+                  id: closeBadge
+                  readonly property bool wanted: panel.slotIds.length > 1 && Hyprland.usingLua && !deskCell.held
+                      && ((deskHover.hovered && stripOpen.value > 0.9) || panel.altHeld)
+                  width: Math.max(Motion.controlMin, Math.round(22 * panel.uiScale))
+                  height: width
+                  radius: width / 2
+                  x: -Math.round(width * 0.35)
+                  y: -Math.round(width * 0.35)
+                  z: 3
+                  color: badgeArea.pressed ? "#c8c8cc" : badgeArea.containsMouse ? "#ffffff" : "#ececef"
+                  border.width: 1
+                  border.color: Qt.rgba(0, 0, 0, 0.25)
+                  opacity: closeBadge.wanted ? 1 : 0
+                  visible: opacity > 0.001
+                  scale: closeBadge.wanted ? 1 : Motion.iconFromScale
+                  Behavior on opacity {
+                    NumberAnimation {
+                      duration: closeBadge.wanted ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
+                  Behavior on scale {
+                    NumberAnimation {
+                      duration: closeBadge.wanted ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
+                  Behavior on color {
+                    ColorAnimation {
+                      duration: badgeArea.containsMouse ? Motion.instant : Motion.fast
+                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    }
+                  }
+                  Text {
+                    anchors.centerIn: parent
+                    text: "\u00d7"
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.round(closeBadge.width * 0.72)
+                    color: "#1d1d1f"
+                  }
+                  MouseArea {
+                    id: badgeArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: if (deskCell.wsId >= 0) panel.removeDesktop(deskCell.wsId)
                   }
                 }
 
@@ -2094,6 +2758,7 @@ Item {
                   id: deskDrag
                   target: null
                   enabled: panel.slotIds.length > 1 && root.settled && !panel.reorderPending && Hyprland.usingLua
+                      && panel.stripExpanded && panel.dragWindow < 0
                   cursorShape: Qt.ClosedHandCursor
                   onActiveChanged: {
                     if (active) {
@@ -2138,6 +2803,55 @@ Item {
               }
             }
           }
+
+          // "+" at the right edge: a new desktop after the last one (macOS).
+          // Unfolds with the thumbnails, and lights up under a dragged window.
+          Rectangle {
+            id: plusTile
+            readonly property bool dropHover: panel.dragWindow >= 0 && panel.dropSlot === -1
+            readonly property bool lit: plusHover.hovered || plusTile.dropHover
+            x: panel.plusX
+            y: strip.rowY
+            width: panel.plusW
+            height: panel.stripTileH
+            radius: panel.thumbRadius
+            color: Util.alpha(panel.overlayInk, plusTap.pressed ? 0.28 : plusTile.lit ? 0.22 : 0.12)
+            border.width: Math.max(1, Math.round(2 * panel.uiScale))
+            border.color: plusTile.dropHover ? Color.accent
+                        : Util.alpha(panel.overlayInk, plusTile.lit ? 0.55 : 0.16)
+            opacity: stripOpen.value * (panel.plusVisible ? 1 : 0)
+            visible: opacity > 0.001
+            transformOrigin: Item.Bottom
+            scale: root.lerp(0.6, 1, stripOpen.value) * (plusTap.pressed ? Motion.pressScale : 1)
+            Behavior on color {
+              ColorAnimation {
+                duration: plusTile.lit ? Motion.instant : Motion.fast
+                easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+              }
+            }
+            Behavior on border.color {
+              ColorAnimation {
+                duration: plusTile.lit ? Motion.instant : Motion.fast
+                easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+              }
+            }
+            Text {
+              anchors.centerIn: parent
+              text: "+"
+              font.family: root.fontFamily
+              // Guarded: the tile height is NaN for a frame before the panel
+              // has a size, and a NaN pixel size is a warning per frame.
+              font.pixelSize: Math.max(8, Math.round(isFinite(panel.stripTileH) ? panel.stripTileH * 0.45 : 8))
+              color: panel.overlayInk
+              style: Text.Raised
+              styleColor: Qt.rgba(0, 0, 0, 0.35)
+            }
+            HoverHandler { id: plusHover }
+            TapHandler {
+              id: plusTap
+              onTapped: panel.addDesktop()
+            }
+          }
         }
 
         // The current desktop's exposé rides on the sideways swipe.
@@ -2174,8 +2888,10 @@ Item {
               // it reads as the desktop shrinking rather than a new screen
               // appearing.
               //
-              // "target" is its place in the overview: the same position and size
-              // scaled by the one factor every window shares.
+              // "target" is its place in the overview, out of panel.layout: the
+              // same position and size scaled by the one factor every window
+              // shares (Mission Control), a packed row (App Exposé) or a
+              // screen edge (Show Desktop).
               // Screen-relative: what Hyprland reports, minus this monitor's
               // origin. The overview layout is built in this space.
               // Guarded for the same reason as the strip thumbnails above:
@@ -2185,20 +2901,130 @@ Item {
 
               readonly property real screenX: at[0] - panel.monX
               readonly property real screenY: at[1] - panel.monY
-
-              readonly property real realX: screenX
-              readonly property real realY: screenY
               readonly property real realW: size[0]
               readonly property real realH: size[1]
-              readonly property real targetX: panel.originX + screenX * panel.shrink
-              readonly property real targetY: panel.originY + screenY * panel.shrink
-              readonly property real targetW: realW * panel.shrink
-              readonly property real targetH: realH * panel.shrink
+
+              readonly property var slot: panel.layout[win.index]
+                  || ({ x: win.screenX, y: win.screenY, s: 1, onScreen: true, minimized: false })
+              // On the real screen right now? Windows from other desktops (App
+              // Exposé) are not: they have no rect to start from, so they are
+              // born at their overview place and fade in there instead.
+              readonly property bool onScreen: win.slot.onScreen !== false
+              readonly property real realX: win.onScreen ? win.screenX : win.slot.x
+              readonly property real realY: win.onScreen ? win.screenY : win.slot.y
+
+              // The overview rect glides when the layout changes while the
+              // overview is up -- the strip unfolding, a mode switch, a window
+              // closing -- on springs, so an interrupted move keeps its speed.
+              // Snapped on open: there the shrink itself is the animation.
+              HUi.SpringValue { id: tX; to: win.slot.x; preset: Motion.smooth; epsilon: 0.5 }
+              HUi.SpringValue { id: tY; to: win.slot.y; preset: Motion.smooth; epsilon: 0.5 }
+              HUi.SpringValue { id: tS; to: win.slot.s; preset: Motion.smooth }
+              function snapTarget() {
+                tX.snap(tX.to);
+                tY.snap(tY.to);
+                tS.snap(tS.to);
+              }
+              Connections {
+                target: root
+                function onShownChanged() { if (root.shown) win.snapTarget() }
+              }
+              readonly property real targetX: tX.value
+              readonly property real targetY: tY.value
+              readonly property real targetS: tS.value
+              readonly property real targetW: win.realW * win.targetS
+              readonly property real targetH: win.realH * win.targetS
+
+              // Quick Look (Space): grown to fill most of the exposé area, never
+              // past its real size.
+              readonly property bool peeking: panel.peek === win.index
+              HUi.SpringValue { id: peekT; to: win.peeking ? 1 : 0; preset: Motion.smooth }
+              readonly property real peekS: Math.min(1, panel.peekAreaW / Math.max(1, win.realW),
+                                                     panel.peekAreaH / Math.max(1, win.realH))
+              readonly property real peekX: panel.peekAreaX + (panel.peekAreaW - win.realW * win.peekS) / 2
+              readonly property real peekY: panel.peekAreaY + (panel.peekAreaH - win.realH * win.peekS) / 2
+
+              // Drag to a desktop in the strip. The offset is measured from
+              // where the drag activated, so the window does not jump by the
+              // drag threshold; while held it is pinned to the pointer, dropped
+              // anywhere else it springs home with the release speed, dropped
+              // on a desktop it stays there and dissolves (Hyprland moves the
+              // real window, and this copy leaves with it).
+              readonly property bool held: winDrag.active
+              property bool landing: false
+              property bool dropped: false
+              property real dragOriginX: 0
+              property real dragOriginY: 0
+              property real dragDX: 0
+              property real dragDY: 0
+              HUi.SpringValue {
+                id: dX
+                to: win.held || win.dropped ? win.dragDX : 0
+                preset: Motion.snappy
+                epsilon: 0.5
+                onRunningChanged: win.checkLanded()
+              }
+              HUi.SpringValue {
+                id: dY
+                to: win.held || win.dropped ? win.dragDY : 0
+                preset: Motion.snappy
+                epsilon: 0.5
+                onRunningChanged: win.checkLanded()
+              }
+              // Over the strip the dragged window shrinks towards thumbnail
+              // size, about its centre, so it shrinks under the pointer.
+              readonly property bool overStrip: (win.held || win.dropped) && panel.dropSlot !== -2
+              HUi.SpringValue {
+                id: dS
+                to: win.overStrip ? Math.min(1, (panel.stripTileW / panel.monW) / Math.max(0.01, win.targetS)) : 1
+                preset: Motion.smooth
+              }
+              function checkLanded() {
+                if (!dX.running && !dY.running)
+                  win.landing = false;
+              }
+
+              // The rect on screen this frame: open/close progress first, then
+              // Quick Look, then the drag.
+              readonly property real p: root.progress
+              readonly property real ovX: root.lerp(win.realX, win.targetX, win.p)
+              readonly property real ovY: root.lerp(win.realY, win.targetY, win.p)
+              readonly property real ovS: root.lerp(win.onScreen ? 1 : win.targetS * 0.92, win.targetS, win.p)
+              readonly property real baseS: root.lerp(win.ovS, win.peekS, peekT.value)
+              readonly property real fs: win.baseS * dS.value
+              readonly property real fx: root.lerp(win.ovX, win.peekX, peekT.value) + dX.value + win.realW * (win.baseS - win.fs) / 2
+              readonly property real fy: root.lerp(win.ovY, win.peekY, peekT.value) + dY.value + win.realH * (win.baseS - win.fs) / 2
+              readonly property real fw: win.realW * win.fs
+              readonly property real fh: win.realH * win.fs
 
               // Labels and the selection ring belong to the overview, so they
-              // sit at the target rect and fade in over the last stretch of the
-              // shrink instead of riding down at full size.
-              readonly property real labelOpacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
+              // sit at the overview rect and fade in over the last stretch of
+              // the shrink instead of riding down at full size. Show Desktop
+              // has no labels: the windows are on their way out.
+              readonly property real labelOpacity: root.desktopMode ? 0
+                  : Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
+
+              // Born while the overview was already up (a window opened, Tab
+              // to another app): fades in rather than popping.
+              property real born: 1
+              Component.onCompleted: {
+                win.snapTarget();
+                if (root.settled) {
+                  win.born = 0;
+                  bornIn.start();
+                }
+              }
+              NumberAnimation {
+                id: bornIn
+                target: win
+                property: "born"
+                to: 1
+                duration: Motion.fast
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: Motion.easeOut
+              }
+
+              z: win.held || win.landing || win.dropped || win.peeking ? 2 : 0
 
               // The window itself. Its size never changes -- it stays at the real
               // size and is moved and scaled with a transform. Animating
@@ -2207,13 +3033,24 @@ Item {
               // is uniform, so this is the same motion as before, only cheaper.
               Item {
                 id: body
-                x: root.lerp(win.realX, win.targetX, root.progress)
-                y: root.lerp(win.realY, win.targetY, root.progress)
+                x: win.fx
+                y: win.fy
                 width: win.realW
                 height: win.realH
                 transform: Scale {
-                  xScale: root.lerp(1, panel.shrink, root.progress)
-                  yScale: xScale
+                  xScale: win.fs
+                  yScale: win.fs
+                }
+                // Off-screen windows fade in with the open; a minimized one
+                // sits a little dimmer in its row; a dropped one dissolves
+                // into the desktop it was dropped on.
+                opacity: (win.onScreen ? 1 : win.p) * win.born * (win.slot.minimized ? 0.75 : 1) * (win.dropped ? 0 : 1)
+                Behavior on opacity {
+                  enabled: win.dropped
+                  NumberAnimation {
+                    duration: Motion.fast
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeExit
+                  }
                 }
 
                 // Hyprland's border, drawn outside the window like Hyprland does.
@@ -2226,7 +3063,7 @@ Item {
                   border.width: root.decoBorder
                   border.color: win.modelData.activated ? root.decoActive : root.decoInactive
                   opacity: Math.max(0, 1 - root.progress * 2)
-                  visible: opacity > 0 && root.decoBorder > 0
+                  visible: win.onScreen && opacity > 0 && root.decoBorder > 0
                   scale: shot.scale
                 }
 
@@ -2260,7 +3097,7 @@ Item {
                     paintCursor: false
                   }
 
-                  scale: win.isSelected && root.settled && root.showSelection ? 1.02 : 1.0
+                  scale: win.isSelected && root.settled && root.showSelection && !win.peeking && !win.held ? 1.02 : 1.0
                   Behavior on scale {
                     NumberAnimation {
                       duration: win.isSelected ? Motion.instant : Motion.fast
@@ -2286,7 +3123,7 @@ Item {
                   // Only once the windows have settled: during the shrink they are
                   // sliding under a stationary pointer, so every window they pass
                   // under would grab the selection.
-                  onHoveredChanged: if (hovered && root.settled && Math.abs(root.slide) < 0.01) {
+                  onHoveredChanged: if (hovered && root.settled && Math.abs(root.slide) < 0.01 && panel.dragWindow < 0) {
                     root.showSelection = true;
                     panel.selected = win.index;
                   }
@@ -2295,25 +3132,71 @@ Item {
                 TapHandler {
                   onTapped: root.focusWindow(String(win.modelData.address))
                 }
+
+                DragHandler {
+                  id: winDrag
+                  target: null
+                  enabled: root.settled && root.missionMode && panel.peek < 0 && Hyprland.usingLua
+                      && panel.dragTile < 0 && !win.dropped
+                  cursorShape: Qt.ClosedHandCursor
+                  onActiveChanged: {
+                    if (active) {
+                      win.dragOriginX = centroid.scenePosition.x;
+                      win.dragOriginY = centroid.scenePosition.y;
+                      win.dragDX = 0;
+                      win.dragDY = 0;
+                      dX.snap(0);
+                      dY.snap(0);
+                      panel.dragWindow = win.index;
+                      panel.dropSlot = -2;
+                    } else {
+                      const slot = panel.dropSlot;
+                      panel.dragWindow = -1;
+                      if (slot !== -2) {
+                        win.dropped = true;
+                        panel.moveWindowToSlot(String(win.modelData.address), slot);
+                      } else {
+                        win.landing = true;
+                        const cap = Motion.maximumFlickVelocity;
+                        dX.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.x));
+                        dY.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.y));
+                      }
+                      panel.dropSlot = -2;
+                    }
+                  }
+                  onCentroidChanged: {
+                    if (!active)
+                      return;
+                    win.dragDX = centroid.scenePosition.x - win.dragOriginX;
+                    win.dragDY = centroid.scenePosition.y - win.dragOriginY;
+                    dX.snap(dX.to);
+                    dY.snap(dY.to);
+                    // Carried towards the strip: it unfolds to receive it.
+                    if (centroid.scenePosition.y < panel.stripFullH)
+                      panel.stripExpanded = true;
+                    panel.dropSlot = panel.dropSlotAt(centroid.scenePosition.x, centroid.scenePosition.y);
+                  }
+                }
               }
 
-              // Selection is a ring plus a nudge in size. No fill and no dim on
+              // Selection is a ring in the accent colour plus a nudge in size
+              // (macOS: a blue frame under the pointer). No fill and no dim on
               // the others: in the exposé the windows are the content, and
               // dimming five of six makes the whole view look switched off.
               // Outside the scaled body so its border is not scaled down with it.
               Rectangle {
-                x: win.targetX
-                y: win.targetY
-                width: win.targetW
-                height: win.targetH
+                x: win.fx
+                y: win.fy
+                width: win.fw
+                height: win.fh
                 scale: shot.scale
                 radius: Style.space(Motion.radiusPopover * panel.uiScale)
-                color: Util.alpha(panel.overlayInk, 0)
+                color: Util.alpha(Color.accent, 0)
                 border.width: Math.max(2, Math.round(3 * panel.uiScale))
                 // Gone the instant a close starts: left at the overview rect while
                 // the window grows back, it was a ghost frame on every close.
-                visible: root.settled && root.showSelection
-                border.color: Util.alpha(panel.overlayInk, win.isSelected ? 0.92 : 0)
+                visible: root.settled && root.showSelection && !root.desktopMode && !win.dropped
+                border.color: Util.alpha(Color.accent, win.isSelected ? 0.95 : 0)
                 Behavior on border.color {
                   ColorAnimation {
                     duration: win.isSelected ? Motion.instant : Motion.fast
@@ -2327,11 +3210,11 @@ Item {
               // small floating window does not get an icon wider than itself.
               Image {
                 id: appIcon
-                width: Math.min(panel.iconSize, win.targetW * 0.4)
+                width: Math.min(panel.iconSize, win.fw * 0.4)
                 height: width
-                x: win.targetX + (win.targetW - width) / 2
-                y: win.targetY + win.targetH - height / 2
-                opacity: win.labelOpacity
+                x: win.fx + (win.fw - width) / 2
+                y: win.fy + win.fh - height / 2
+                opacity: win.labelOpacity * win.born * (win.dropped ? 0 : 1)
                 visible: opacity > 0
                 source: root.iconFor(win.ipc ? win.ipc["class"] : "")
                 sourceSize.width: panel.iconSize
@@ -2341,9 +3224,12 @@ Item {
                 smooth: true
               }
 
+              // The title shows for the window under the pointer, the selected
+              // one and the one in Quick Look (macOS), not for all at once.
               Text {
-                width: Math.max(win.targetW, panel.width * 0.16)
-                x: win.targetX + (win.targetW - width) / 2
+                readonly property bool wanted: winHover.hovered || (win.isSelected && root.showSelection) || win.peeking
+                width: Math.max(win.fw, panel.width * 0.16)
+                x: win.fx + (win.fw - width) / 2
                 y: appIcon.y + appIcon.height + Math.round(panel.titleSize * 0.5)
                 horizontalAlignment: Text.AlignHCenter
                 // Untrusted: see root.displayLabel.
@@ -2351,15 +3237,14 @@ Item {
                 text: root.displayLabel(win.modelData.title || (win.ipc && win.ipc["class"]) || "")
                 font.family: root.fontFamily
                 font.pixelSize: panel.titleSize
-                color: win.isSelected ? panel.overlayInk
-                                      : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
-                Behavior on color {
-                  ColorAnimation {
-                    duration: win.isSelected ? Motion.instant : Motion.fast
+                color: panel.overlayInk
+                opacity: win.labelOpacity * (wanted && !win.dropped ? 1 : 0)
+                Behavior on opacity {
+                  NumberAnimation {
+                    duration: Motion.fast
                     easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                   }
                 }
-                opacity: win.labelOpacity
                 visible: opacity > 0
                 elide: Text.ElideRight
                 maximumLineCount: 1
@@ -2372,12 +3257,12 @@ Item {
           // An empty desktop says so, rather than leaving a blank half-screen
           // that looks like something failed to load.
           Text {
-            visible: panel.windows.length === 0
+            visible: panel.windows.length === 0 && !root.desktopMode
             opacity: Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
             anchors.horizontalCenter: parent.horizontalCenter
             y: panel.exposeAreaY + panel.exposeAreaH * 0.42
             textFormat: Text.PlainText
-            text: "No windows"
+            text: root.appMode ? "No windows of this app" : "No windows"
             font.family: root.fontFamily
             font.pixelSize: Math.round(22 * panel.uiScale)
             color: Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
@@ -2389,7 +3274,7 @@ Item {
         // through. Instantiated all the while the overview is up, so their
         // captures already have frames when a swipe brings them into view.
         Repeater {
-          model: panel.slideOwner ? [-1, 1] : []
+          model: panel.slideOwner && root.missionMode ? [-1, 1] : []
 
           delegate: Item {
             id: page

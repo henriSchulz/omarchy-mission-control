@@ -17,6 +17,7 @@
   --radius-control: 8px;
   --radius-row: 6px;
   --radius-chip: 5px;
+  --radius-pill: 999px;   /* capsules: toolbar clusters, segmented controls */
 
   --control-height: 28px;
   --control-min: 20px;

@@ -1,0 +1,188 @@
+/* Quick Look (GNOME Sushi, GTK3) in the henri-ui style, after macOS Quick Look:
+ * one calm surface in the theme's background, a flat title bar with the file
+ * name, round close and "Open with" glyphs on the left, a soft window shadow
+ * and 14 px corners.
+ *
+ * TEMPLATE — henri-ui-gtk-colors renders it into
+ * ~/.local/share/themes/HenriQuickLook/gtk-3.0/gtk.css, filling the {{…}} placeholders from
+ * gtk-tokens.css (durations, curves, radii) and the active Omarchy theme
+ * (hui-* colors). GTK3 has no CSS variables, hence the template. Sushi alone
+ * runs with this theme (GTK_THEME in its D-Bus service file), so nothing here
+ * needs scoping. It forces prefer-dark; a theme without gtk-dark.css makes GTK
+ * fall back to this file, so light/dark follows the Omarchy theme instead. */
+
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/{{adwaita}}");
+
+@define-color theme_bg_color {{hui-bg}};
+@define-color theme_base_color {{hui-view}};
+@define-color theme_fg_color {{hui-fg}};
+@define-color theme_text_color {{hui-fg}};
+@define-color theme_selected_bg_color {{hui-accent}};
+@define-color theme_selected_fg_color {{hui-on-accent}};
+@define-color accent_bg_color {{hui-accent}};
+@define-color accent_fg_color {{hui-on-accent}};
+@define-color window_bg_color {{hui-bg}};
+@define-color window_fg_color {{hui-fg}};
+@define-color headerbar_bg_color {{hui-bg}};
+@define-color headerbar_fg_color {{hui-fg}};
+@define-color borders alpha({{hui-fg}}, {{hairline}});
+/* Unfocused: the same surface, not Adwaita's warmer backdrop grey. */
+@define-color theme_unfocused_bg_color {{hui-bg}};
+@define-color theme_unfocused_base_color {{hui-view}};
+@define-color theme_unfocused_fg_color {{hui-fg}};
+@define-color theme_unfocused_text_color {{hui-fg}};
+@define-color theme_unfocused_selected_bg_color {{hui-accent}};
+@define-color theme_unfocused_selected_fg_color {{hui-on-accent}};
+
+window,
+window.background,
+window.background:backdrop,
+.titlebar,
+headerbar {
+  background-color: {{hui-bg}};
+  color: {{hui-fg}};
+}
+
+/* The window: rounded, one hairline, a soft shadow (no heavy CSD border). */
+decoration {
+  border-radius: {{radius-panel}};
+  box-shadow: 0 0 0 1px alpha({{hui-fg}}, {{hairline}}),
+              0 12px 40px alpha(black, 0.22);
+}
+decoration:backdrop {
+  box-shadow: 0 0 0 1px alpha({{hui-fg}}, {{hairline}}),
+              0 8px 24px alpha(black, 0.14);
+}
+window.csd,
+window.csd > .titlebar,
+window.csd > headerbar {
+  border-radius: {{radius-panel}} {{radius-panel}} 0 0;
+}
+
+/* Title bar: flat, same surface as the content, no separator line. */
+headerbar,
+.titlebar {
+  min-height: 44px;
+  padding: 0 10px;
+  border: none;
+  box-shadow: none;
+  background-image: none;
+}
+headerbar:backdrop,
+.titlebar:backdrop {
+  background-color: {{hui-bg}};
+  background-image: none;
+}
+headerbar .title {
+  font-weight: 600;
+  color: {{hui-fg}};
+}
+headerbar:backdrop .title {
+  color: alpha({{hui-fg}}, {{secondary}});
+}
+
+/* Buttons: quiet pills, hover fill in fast and out slower, press darker. */
+button {
+  min-height: {{control-height}};
+  padding: 0 12px;
+  border: none;
+  border-radius: {{radius-control}};
+  background-image: none;
+  background-color: alpha({{hui-fg}}, 0.06);
+  color: {{hui-fg}};
+  box-shadow: none;
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+  transition: background-color {{dur-fast}} {{ease-out}};
+}
+button:hover {
+  background-color: alpha({{hui-fg}}, 0.10);
+  transition-duration: {{dur-instant}};
+}
+button:active,
+button:checked {
+  background-color: alpha({{hui-fg}}, 0.16);
+  transition-duration: {{dur-instant}};
+}
+button:backdrop {
+  background-color: alpha({{hui-fg}}, 0.04);
+  color: alpha({{hui-fg}}, {{secondary}});
+}
+
+/* Close and "Open with ..." sit together top left as two round glyphs on a
+ * quiet fill, the way Quick Look shows them. */
+headerbar button.titlebutton,
+headerbar button.titlebutton.close,
+headerbar button.henri-round {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  margin: 0 4px 0 0;
+  border-radius: {{radius-pill}};
+  background-color: alpha({{hui-fg}}, 0.08);
+}
+headerbar button.titlebutton:hover,
+headerbar button.henri-round:hover {
+  background-color: alpha({{hui-fg}}, 0.16);
+}
+headerbar button.titlebutton:backdrop,
+headerbar button.henri-round:backdrop {
+  background-color: alpha({{hui-fg}}, 0.06);
+}
+
+/* Media / document toolbars floating over the preview (Sushi uses .osd). */
+.osd,
+.osd.toolbar,
+toolbar.osd {
+  border: none;
+  border-radius: {{radius-popover}};
+  background-color: alpha({{hui-bg}}, {{surface}});
+  color: {{hui-fg}};
+  box-shadow: 0 0 0 1px alpha({{hui-fg}}, {{hairline}}),
+              0 8px 24px alpha(black, 0.18);
+}
+.osd button {
+  background-color: transparent;
+  color: {{hui-fg}};
+}
+.osd button:hover {
+  background-color: alpha({{hui-fg}}, 0.10);
+}
+.osd scale trough {
+  background-color: alpha({{hui-fg}}, 0.14);
+  border-radius: {{radius-pill}};
+}
+.osd scale highlight {
+  background-color: {{hui-fg}};
+  border-radius: {{radius-pill}};
+}
+.osd scale slider {
+  background-color: {{hui-view}};
+  border: none;
+  box-shadow: 0 0 0 1px alpha({{hui-fg}}, {{hairline}}),
+              0 1px 3px alpha(black, 0.2);
+}
+
+/* Text and code previews: white page, readable secondary text. */
+textview,
+textview text {
+  background-color: {{hui-view}};
+  color: {{hui-fg}};
+}
+.dim-label {
+  opacity: 1;
+  color: alpha({{hui-fg}}, {{secondary}});
+}
+
+selection,
+*:selected {
+  background-color: {{hui-selection}};
+  color: {{hui-fg}};
+}
+
+/* Keyboard focus: the macOS accent ring instead of Adwaita's dotted outline. */
+button:focus {
+  outline: 2px solid alpha({{hui-accent}}, 0.5);
+  outline-offset: 1px;
+  -gtk-outline-radius: {{radius-control}};
+}

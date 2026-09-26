@@ -8,9 +8,24 @@ GPU-transformed animation.
 
 ![Mission Control showing six desktop thumbnails across the top and the current desktop's window shrunk out beneath them](preview.png)
 
-A strip of live desktop thumbnails across the top, and underneath it the current
-desktop's windows shrunk out so none overlaps, each with its app icon and title.
-Click a window to jump to it, click a desktop to switch to it.
+A Spaces strip across the top, and underneath it the current desktop's windows
+shrunk out so none overlaps, each with its app icon; the title shows for the
+window under the pointer. Click a window to jump to it, click a desktop to
+switch to it. The strip opens folded, showing only the desktops' names, and
+unfolds into live thumbnails when the pointer touches it -- with a "+" at the
+right end for a new desktop and an "x" on each thumbnail to remove one. Drag a
+window onto a thumbnail (or onto the "+") to move it there.
+
+Three modes, as in macOS:
+
+| Mode | What it shows | Open with |
+| --- | --- | --- |
+| **Mission Control** | the Spaces strip and the current desktop's windows | F8, four fingers up |
+| **App Exposé** | one app's windows from every desktop, packed side by side; windows the dock has minimized in a smaller row underneath; `Tab` moves on to the next app | SHIFT+F8, four fingers down |
+| **Show Desktop** | every window slid out to the nearest screen edge, only a sliver left, so the wallpaper is clear | CTRL+F8 |
+
+Pressing the same key again closes; another mode's key switches in place, the
+windows gliding to their new places.
 
 The open is two-phase, and that is the whole point: the surface goes up with
 every window drawn at its real size and position — pixel-for-pixel the desktop
@@ -27,22 +42,26 @@ see.
 omarchy plugin add https://github.com/henriSchulz/omarchy-mission-control --enable
 ```
 
-Then bind a key — plugins cannot bind keys themselves. In `~/.config/hypr/bindings.lua`:
+Then bind keys — plugins cannot bind keys themselves. In `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("CTRL + UP", "Mission Control",
-  "omarchy-shell shell toggle henri.missioncontrol '{}'")
-
--- Optional: a dedicated exit, so CTRL+UP is never an accidental re-open.
-o.bind("CTRL + DOWN", "Close Mission Control",
-  "omarchy-shell shell hide henri.missioncontrol")
+-- As Hyprland events straight to the plugin: no process per key press.
+o.bind("F8", "Mission Control", hl.dsp.event("mission-control toggle"))
+o.bind("SHIFT + F8", "App Exposé", hl.dsp.event("mission-control toggle app"))
+o.bind("CTRL + F8", "Show Desktop", hl.dsp.event("mission-control toggle desktop"))
 ```
+
+Any key works; F8 is only what this machine had free. The shell's IPC works
+too, if you prefer it: `omarchy-shell shell toggle henri.missioncontrol
+'{"mode":"app"}'` (modes `mission`, `app`, `desktop`; `app` also takes
+`"app":"<app id>"`).
 
 For the legacy (non-Lua) Hyprland config format, see [`install/bindings.conf`](install/bindings.conf).
 
 Touchpad gestures are optional and live in [`install/gestures.lua`](install/gestures.lua).
 The overview tracks a four-finger vertical swipe live: the windows shrink as your
 fingers move, and on release it settles open or closed by distance and speed.
+Up is Mission Control, down is App Exposé of the app you are in (macOS).
 A four-finger sideways swipe inside the overview slides between desktops, the
 next one coming in beside the current one; outside it stays Hyprland's normal
 workspace swipe.
@@ -77,14 +96,21 @@ thing it asks you to change, and you make that change yourself.
 | --- | --- |
 | `←` `→` | Walk the Spaces strip — switches desktop **without** closing, so you can look before you leap |
 | `↑` `↓` | Move between the windows of the current desktop |
-| `Tab` | Cycle windows |
+| `Tab` | Cycle windows; in App Exposé, the next app |
+| `Space` | Quick Look: the selected window grows to fill the screen, `Space` or `Esc` puts it back |
+| `Alt` (hold) | Show the "x" on every desktop thumbnail |
 | `1`–`9` | Jump straight to that desktop |
 | `Enter` | Open the selected window |
 | `Esc`, click the backdrop | Close |
 | `CTRL`+`↓` / `CTRL`+`↑` | Close (mirrors whatever opened it) |
 
 Clicking a desktop thumbnail switches to it and closes. Clicking a window
-focuses it and closes.
+focuses it and closes. Dragging a window onto a thumbnail moves it to that
+desktop; onto the "+" it goes to a new one. The "x" on a thumbnail moves its
+windows to the desktop on its left and renumbers the ones after it, so
+`SUPER`+`n` stays gap-free. A desktop added with "+" lives in the plugin until
+something lands on it (Hyprland only creates a workspace then) -- it survives
+the overview closing, not a shell restart.
 
 Drag a desktop thumbnail along the strip to reorder the desktops; the others
 slide aside to make room. The numbers stay in place and the windows move, so
@@ -112,6 +138,14 @@ path; the wallpaper is always loaded through the link itself.
   ```
 
   It works without this; the strip is just less stable.
+
+## Testing without touching the screen
+
+`tests/harness.sh` runs the plugin in its own Quickshell instance on a headless
+output only (`MISSION_CONTROL_TEST_SCREEN`), never taking the keyboard, and
+exposes it over IPC (`open '{"mode":"app"}'`, `hide`, `state`, and `panel`
+for poking at the overlay). `grim -o HEADLESS-1` then shows what it drew.
+The shell's copy is untouched, and so is the user's monitor.
 
 ## Theming
 

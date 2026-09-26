@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Quick Look text/code previews in the active Omarchy theme (henri-ui).
+     TEMPLATE — henri-ui-gtk-colors renders it into
+     ~/.local/share/gtksourceview-4/styles/henri-quicklook.xml. Sushi asks for
+     "builder-dark" by name; the henri-quicklook launcher hands out this one. -->
+<style-scheme id="henri-quicklook" name="Henri Quick Look" version="1.0">
+  <description>Omarchy theme colors for Quick Look previews</description>
+
+  <style name="text" foreground="{{hui-fg}}" background="{{hui-view}}"/>
+  <style name="selection" background="{{hui-selection}}"/>
+  <style name="selection-unfocused" background="{{hui-selection}}"/>
+  <style name="cursor" foreground="{{hui-accent}}"/>
+  <style name="current-line" background="{{hui-bg}}"/>
+  <style name="line-numbers" foreground="{{muted}}" background="{{hui-view}}"/>
+  <style name="bracket-match" background="{{hui-selection}}" bold="true"/>
+
+  <style name="def:comment" foreground="{{dark-foreground}}" italic="true"/>
+  <style name="def:shebang" foreground="{{dark-foreground}}" bold="true"/>
+  <style name="def:doc-comment-element" italic="true"/>
+  <style name="def:constant" foreground="{{blue}}"/>
+  <style name="def:string" foreground="{{red}}"/>
+  <style name="def:special-char" foreground="{{orange}}"/>
+  <style name="def:number" foreground="{{blue}}"/>
+  <style name="def:boolean" foreground="{{magenta}}"/>
+  <style name="def:keyword" foreground="{{magenta}}" bold="true"/>
+  <style name="def:statement" foreground="{{magenta}}" bold="true"/>
+  <style name="def:type" foreground="{{cyan}}"/>
+  <style name="def:identifier" foreground="{{hui-fg}}"/>
+  <style name="def:function" foreground="{{green}}"/>
+  <style name="def:preprocessor" foreground="{{orange}}"/>
+  <style name="def:error" foreground="{{hui-urgent}}" underline="error"/>
+  <style name="def:note" foreground="{{yellow}}" bold="true"/>
+  <style name="def:underlined" underline="single"/>
+  <style name="def:emphasis" italic="true"/>
+  <style name="def:strong-emphasis" bold="true"/>
+  <style name="def:heading" foreground="{{hui-fg}}" bold="true"/>
+  <style name="def:link-text" foreground="{{hui-accent}}"/>
+  <style name="def:link-destination" foreground="{{hui-accent}}" underline="single"/>
+  <style name="def:inline-code" foreground="{{red}}"/>
+  <style name="def:list-marker" foreground="{{hui-accent}}" bold="true"/>
+  <style name="def:insert" foreground="{{green}}"/>
+  <style name="def:delete" foreground="{{red}}"/>
+</style-scheme>
