@@ -1042,16 +1042,42 @@ Item {
           }
         }
       }
-      // While hidden, refresh the kept frames now and then, so what shows for
-      // the first frames of an open is recent rather than from the last open.
+      // While hidden, refresh the kept frames so what shows for the first
+      // frames of an open is recent rather than from the last open. Not on a
+      // clock: a 1.5 s timer was 25 screencopy round-trips per 10 s (measured
+      // 2026-09-26) for an overlay nobody was looking at, and kept the
+      // compositor from ever going quiet. Now on desktop changes -- a window
+      // opened, closed, moved, a workspace switched -- debounced, with a slow
+      // fallback for content that changes without any of that. Not on focus:
+      // every layer that opens and closes flips the active window, which on
+      // this desktop happens every couple of seconds, and a focus change
+      // does not change what the windows show anyway.
+      function recaptureHidden() {
+        if (root.shown) return;
+        for (let i = 0; i < exposeRepeater.count; i++) {
+          const item = exposeRepeater.itemAt(i);
+          if (item) item.recapture();
+        }
+      }
       Timer {
-        interval: 1500
+        id: hiddenRecapture
+        interval: Motion.slow
+        onTriggered: panel.recaptureHidden()
+      }
+      Timer {
+        interval: 30000
         repeat: true
         running: !root.shown
-        onTriggered: {
-          for (let i = 0; i < exposeRepeater.count; i++) {
-            const item = exposeRepeater.itemAt(i);
-            if (item) item.recapture();
+        onTriggered: hiddenRecapture.restart()
+      }
+      Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+          if (root.shown) return;
+          switch (event.name) {
+          case "openwindow": case "closewindow": case "movewindow": case "movewindowv2":
+          case "workspace": case "workspacev2": case "fullscreen": case "changefloatingmode":
+            hiddenRecapture.restart();
           }
         }
       }
