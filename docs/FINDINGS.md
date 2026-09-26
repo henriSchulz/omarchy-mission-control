@@ -391,3 +391,19 @@ The first pass at 1.3.0 was edited and tested in a tmpfs scratch directory and
 lost to a reboot before it was merged. Keep the working copy on disk
 (`~/.cache`), and the base it was branched from next to it for a three-way
 merge if the live file moves meanwhile.
+
+## 15. A JS array as a Repeater model rebuilds everything on every change
+
+`model: someArray` recreates every delegate whenever the array is reassigned,
+captures included -- and a fresh `ScreencopyView` is blank for two or three
+frames. Every list change under a live overview (a desktop switch, a window
+closing, a focus change reordering the list) therefore flashed. The exposé now
+feeds a `ListModel` that is diffed against the array (`syncModel`): delegates
+survive, only what left is removed and what arrived appended. Object values
+(the toplevel handles) go in as a role and compare by identity on the way out.
+
+## 16. `HyprlandWorkspace.focused` is about the focused monitor
+
+It is only ever true for the workspace of the *focused* monitor, so a panel on
+a second monitor never found its desktop and fell back to the first one. The
+desktop on a monitor is `HyprlandMonitor.activeWorkspace`.
