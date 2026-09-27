@@ -99,7 +99,7 @@ thing it asks you to change, and you make that change yourself.
 | `Tab` | Cycle windows; in App Exposé, the next app |
 | `Space` | Quick Look: the selected window grows to fill the screen, `Space` or `Esc` puts it back |
 | `Alt` (hold) | Show the "x" on every desktop thumbnail |
-| `1`–`9` | Jump straight to that desktop |
+| `1`–`9` | Jump straight to that desktop; the number of the desktop you are on opens the selected window (like `Enter`) |
 | `Enter` | Open the selected window |
 | `Esc`, click the backdrop | Close |
 | `CTRL`+`↓` / `CTRL`+`↑` | Close (mirrors whatever opened it) |

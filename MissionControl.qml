@@ -2501,11 +2501,16 @@ Item {
             return;
           }
           // Number keys switch to that desktop and stay open, like the arrow
-          // keys: look before you leap.
+          // keys: look before you leap. The number of the desktop you are
+          // already on has nowhere to go, so it acts like Enter: the selected
+          // window opens (or, with nothing selected, the overview closes here).
           if (root.missionMode && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
             const want = event.key - Qt.Key_0;
             if (panel.deskIndexOf(want) >= 0) {
-              panel.switchTo(want);
+              if (panel.currentDesktop && panel.currentDesktop.id === want)
+                panel.activateSelection();
+              else
+                panel.switchTo(want);
               event.accepted = true;
               return;
             }
