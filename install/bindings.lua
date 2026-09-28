@@ -10,6 +10,7 @@
 -- XF86Display keysym is bound too, whichever way Fn-Lock is set.
 
 o.bind("F8", "Mission Control", hl.dsp.event("mission-control toggle"))
+o.bind("F9", "App Exposé", hl.dsp.event("mission-control toggle app"))
 o.bind("SHIFT + F8", "App Exposé", hl.dsp.event("mission-control toggle app"))
 o.bind("CTRL + F8", "Show Desktop", hl.dsp.event("mission-control toggle desktop"))
 

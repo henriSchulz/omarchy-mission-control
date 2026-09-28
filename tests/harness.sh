@@ -17,7 +17,12 @@ case ${1:-start} in
     mkdir -p "$dir"
     for d in Commons Ui services; do ln -sfn "/usr/share/omarchy/shell/$d" "$dir/$d"; done
     cp "$plugin/tests/harness.qml" "$dir/shell.qml"
-    hyprctl monitors -j | grep -q "\"name\": \"$screen\"" || hyprctl output create headless "$screen" >/dev/null
+    if hyprctl monitors -j | grep -q "\"name\": \"$screen\""; then
+      rm -f "$dir/own-output"
+    else
+      hyprctl output create headless "$screen" >/dev/null
+      : >"$dir/own-output"   # ours to remove again; a leftover output steals a workspace
+    fi
     MC_PLUGIN=$plugin MISSION_CONTROL_TEST_SCREEN=$screen setsid quickshell -p "$dir/shell.qml" >"$dir/log" 2>&1 &
     echo $! >"$dir/pid"
     echo "started on $screen (pid $!), log: $dir/log"
@@ -25,6 +30,10 @@ case ${1:-start} in
   stop)
     [[ -f $dir/pid ]] && kill "$(cat "$dir/pid")" 2>/dev/null || true
     rm -f "$dir/pid"
+    if [[ -f $dir/own-output ]]; then
+      hyprctl output remove "$screen" >/dev/null || true
+      rm -f "$dir/own-output"
+    fi
     ;;
   ipc)
     shift

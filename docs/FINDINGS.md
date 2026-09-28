@@ -381,9 +381,12 @@ HEADLESS-1` gives it an output, `hl.exec_cmd('foot', { workspace = '<n> silent'
 (layer surfaces are composited on a headless output; windows are not, but the
 overlay's captures of them are). Two traps found on the way: `hyprctl output
 create` interprets a window rule's `move` relative to the monitor, so a window
-started before the output existed lands off-screen; and a headless output does
-not survive a shell restart, taking its workspace (and the test windows) back to
-the real monitor.
+started before the output existed lands off-screen; and the output outlives both
+the test and `omarchy-restart-shell` — only `hyprctl output remove HEADLESS-1`
+or a Hyprland restart takes it away, so `harness.sh stop` does it. A forgotten
+one keeps the workspace Hyprland gave it (usually 2) on a screen nobody can see:
+switching there leaves the picture unchanged while the bar reports the new
+workspace. `hypr-ghost-monitor-clean` clears any that were left behind.
 
 ## 14. A working copy on tmpfs is gone after a reboot
 

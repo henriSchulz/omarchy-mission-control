@@ -2,7 +2,8 @@
 //
 // A Spaces strip of live desktop thumbnails across the top, and underneath it
 // the current desktop's windows shrunk down so none overlaps, each with its app
-// icon and title. Click a window to go to it, click a desktop to switch to it.
+// icon and title. Click a window to go to it, click a desktop to switch to it
+// (the overview stays up, so you can then pick a window there).
 //
 // The open is two-phase, and that is the whole trick behind the macOS feel: the
 // surface goes up with every window drawn at its real size and position -- which
@@ -36,10 +37,8 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
-// henri-ui ships inside this repo (henri-ui/, mirrored from Henri's central copy)
-// so the public plugin works without anyone's home folder. Imported relatively.
-import "henri-ui/Motion.js" as Motion
-import "henri-ui" as HUi
+// Every duration, curve and distance comes from Motion.qml (a singleton
+// registered by the qmldir next to this file) -- see docs/ANIMATION-SPEC.md.
 
 Item {
   id: root
@@ -53,7 +52,7 @@ Item {
   // One line in the shell log on mount, so "is the new code running?" has an
   // answer after a restart (the shell's hot reload does not re-create a
   // keepLoaded overlay, and a cached old version is otherwise invisible).
-  readonly property string build: "1.4.0 pages"
+  readonly property string build: "1.5.0 motion-spec"
   Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
 
   // What the user last asked for, as opposed to what is currently on screen.
@@ -327,7 +326,7 @@ Item {
     to: 0
     duration: root.fadeDuration
     easing.type: Easing.BezierSpline
-    easing.bezierCurve: Motion.easeExit
+    easing.bezierCurve: Motion.easeIn
   }
   onContentVisibleChanged: {
     if (root.contentVisible) {
@@ -339,13 +338,13 @@ Item {
       contentFade.start();
     }
   }
-  // Reduce Motion only: the way in is a crossfade too.
+  // Reduced motion only: the way in is a crossfade too.
   NumberAnimation {
     id: contentFadeIn
     target: root
     property: "contentOpacity"
     to: 1
-    duration: Motion.base
+    duration: Motion.instant
     easing.type: Easing.BezierSpline
     easing.bezierCurve: Motion.easeOut
   }
@@ -374,38 +373,28 @@ Item {
       return;
     root.resetSlide();
     root.stripHold = false;
-    progressAnim.stop();
+    progressTween.stop();
     progressSpring.stop();
     root.springVelocity = 0;
     root.progressAnimDuration = 0;
     root.progress = 0;
   }
 
-  // henri-ui full-screen tokens: the open (keyboard, click, backstop) runs
-  // Motion.slower, the close the exit share of it -- leaving is faster than
-  // arriving. Both follow Motion.speed.
-  // Measured on macOS 26 (60 fps recording, missionControl.2windows in
-  // ~/macos-scrape): the open takes 250 ms, the close ~165 ms -- henri-ui's
-  // overview tokens. The earlier `slower` (520 ms) was twice the real thing.
-  readonly property int shrinkDuration: Motion.overview
-  readonly property int unshrinkDuration: Motion.overviewExit
+  // The open is the spec's `slow` (the overview opening); the close its "tile
+  // back to the real window" case: `base`, while the overview dissolves.
+  // Both ways the windows travel from A to B, so ease-in-out -- a curve that
+  // starts at full speed moved them 18% of the way in the first 5% of the time,
+  // which read as a jolt, and one that ends at full speed slammed the copy into
+  // its real rect right where it has to be indistinguishable from the desktop.
+  readonly property int shrinkDuration: Motion.slow
+  readonly property int unshrinkDuration: Motion.base
   // Shortest animation, for finishing a nearly-done shrink.
   readonly property int shrinkMinDuration: Motion.fast
-  // The closing crossfade over the tail: a short exit fade.
-  readonly property int fadeDuration: Motion.exit(Motion.fast)
-  // Soft start, long gentle settle: henri-ui's easeInOut (the windows move from
-  // A to B, both ways). OutQuart moved the windows 18% of the way in the first
-  // 5% of the time, which read as a jolt; this eases in over the first frames
-  // and glides home. Deliberately not easeExit on the close: that curve ends at
-  // full speed, and the windows would slam into their real rects right where
-  // the copy has to be indistinguishable from the desktop.
+  // The closing crossfade over the tail of the movement.
+  readonly property int fadeDuration: Motion.d(Motion.fast)
   readonly property var shrinkCurve: Motion.easeInOut
-  // The close starts fast and settles (measured: a third of the way home
-  // after the first 25 ms, then easing in) -- easeOut, not the mirror of the
-  // open. It still ends slowly, so the copy lands on the real window rather
-  // than slamming into it.
-  readonly property var unshrinkCurve: Motion.easeOut
-  // Share of the duration after which the curve is ~98.8% home -- where the
+  readonly property var unshrinkCurve: Motion.easeInOut
+  // Share of the duration after which the curve is ~98% home -- where the
   // closing crossfade starts.
   readonly property real fadeStartAt: 0.85
 
@@ -418,84 +407,85 @@ Item {
   // an animation mid-flight, and a release continues from the finger position
   // instead of restarting from 0 or 1.
   property real progress: 0
-  NumberAnimation {
-    id: progressAnim
-    target: root
-    property: "progress"
+  // Stepped per delivered frame with the step capped, not off the wall clock:
+  // over a fullscreen window the compositor holds our first frames back for
+  // ~100 ms, and a clock-driven animation then lands at the end in one jump
+  // instead of shrinking the window at all. This way a stall delays the
+  // motion; it never skips it.
+  FrameAnimation {
+    id: progressTween
+    property real from: 0
+    property real to: 1
+    property int duration: 1
+    property var curve: Motion.easeInOut
+    property real t: 0
+    onTriggered: {
+      t += Math.min(frameTime, 1 / 30) * 1000 / duration;
+      if (t >= 1) {
+        t = 1;
+        root.progress = to;
+        stop();
+        return;
+      }
+      root.progress = from + (to - from) * root.bezier(curve, t);
+    }
+  }
+  // y for x on a cubic bezier (x1, y1, x2, y2), like CSS cubic-bezier.
+  function bezier(c, x) {
+    const x1 = c[0], y1 = c[1], x2 = c[2], y2 = c[3];
+    let u = x;
+    for (let i = 0; i < 6; i++) {
+      const bx = 3 * u * (1 - u) * (1 - u) * x1 + 3 * u * u * (1 - u) * x2 + u * u * u - x;
+      const dx = 3 * (1 - u) * (1 - u) * x1 + 6 * u * (1 - u) * (x2 - x1) + 3 * u * u * (1 - x2);
+      if (Math.abs(dx) < 1e-6)
+        break;
+      u = Math.max(0, Math.min(1, u - bx / dx));
+    }
+    return 3 * u * (1 - u) * (1 - u) * y1 + 3 * u * u * (1 - u) * y2 + u * u * u;
   }
   onExpandedChanged: if (!root.tracking) root.animateProgress(root.expanded ? 1 : 0)
 
-  // Animate to `to` from the current value. Duration scales with the distance
-  // left, so finishing a half-done swipe does not take as long as a full open.
-  // After a swipe the release speed is matched: OutCubic starts at three times
-  // its average speed, so 3 * distance / velocity continues the finger motion
-  // without a visible kink.
+  // Animate to `to` from the current value -- also after a swipe, which
+  // finishes from wherever the fingers left it (spec: on release, glide to
+  // the target). Duration scales with the distance left, so finishing a
+  // half-done swipe does not take as long as a full open.
   // How long the animation just started will take, for the close timers.
   property int progressAnimDuration: 0
 
   function animateProgress(to) {
-    progressAnim.stop();
-    // Reduce Motion: nothing shrinks or slides. The windows are already in
+    progressTween.stop();
+    progressSpring.stop();
+    root.springVelocity = 0;
+    // Reduced motion: nothing shrinks or slides. The windows are already in
     // place and the surface crossfades -- see the fades in setShown.
-    if (Motion.reduceMotion) {
-      progressSpring.stop();
-      root.springVelocity = 0;
-      root.progress = to;
-      root.progressAnimDuration = 0;
-      return;
-    }
     const dist = Math.abs(to - root.progress);
-    if (dist < 0.001 && !progressSpring.running) {
+    if (Motion.reduced || dist < 0.001) {
       root.progress = to;
       root.progressAnimDuration = 0;
-      return;
-    }
-    // A released swipe keeps moving on the spring that followed the fingers,
-    // so position and speed carry over without a kink.
-    if (root.releasing || progressSpring.running) {
-      root.springTarget = to;
-      // Critically damped: an initial speed towards the target above
-      // omega * distance would overshoot, i.e. the windows would briefly grow
-      // past full size or shrink past the overview. Cap it there.
-      const toward = (to - root.progress) * root.springVelocity;
-      const cap = root.springOmegaRelease * dist;
-      if (toward > 0 && Math.abs(root.springVelocity) > cap)
-        root.springVelocity = Math.sign(root.springVelocity) * cap;
-      root.springOmega = root.springOmegaRelease;
-      progressSpring.start();
-      root.progressAnimDuration = root.springSettleTime();
       return;
     }
     const full = to > root.progress ? root.shrinkDuration : root.unshrinkDuration;
     const dur = Math.round(full * Math.sqrt(Math.min(1, dist)));
-    progressAnim.from = root.progress;
-    progressAnim.to = to;
-    progressAnim.duration = Math.max(root.shrinkMinDuration, Math.min(full, dur));
-    progressAnim.easing.type = Easing.BezierSpline;
-    progressAnim.easing.bezierCurve = to > root.progress ? root.shrinkCurve : root.unshrinkCurve;
-    root.progressAnimDuration = progressAnim.duration;
-    progressAnim.start();
+    progressTween.from = root.progress;
+    progressTween.to = to;
+    progressTween.duration = Math.max(root.shrinkMinDuration, Math.min(full, dur));
+    progressTween.curve = to > root.progress ? root.shrinkCurve : root.unshrinkCurve;
+    progressTween.t = 0;
+    root.progressAnimDuration = progressTween.duration;
+    progressTween.start();
   }
 
   // --- finger follower ------------------------------------------------------
   // Setting `progress` straight from the touchpad made every fast or coarse
   // update a visible jump. The fingers now only move `springTarget`; a
   // critically damped spring pulls `progress` towards it every frame. Slow
-  // swipes feel attached, fast ones are smoothed into a glide, and position and
-  // velocity stay continuous through the release.
+  // swipes feel attached, fast ones are smoothed into a glide. It runs only
+  // while the fingers are down: not an animation but the low-pass filter that
+  // keeps the windows attached to them, so its rate is not a motion token.
+  // Lag behind the fingers is about 2 / omega: ~70ms.
   property real springTarget: 0
   property real springVelocity: 0 // progress per second
-  property real springOmega: root.springOmegaTracking
-  // Lag behind the fingers is about 2 / omega: ~70ms while tracking.
-  // Deliberately a literal, not a henri-ui preset: this is not an animation
-  // but the low-pass filter that keeps the windows attached to the fingers.
-  // Tying it to Motion.speed would make direct manipulation feel laggy.
-  readonly property real springOmegaTracking: 28
-  // The release is an animation, so it is henri-ui's `smooth` spring (no
-  // overshoot): omega = 2 pi / response, which also keeps it in step with
-  // Motion.speed. Critically damped; settles (1.5%) in ~5.2 / omega: ~290ms
-  // after release at speed 1 -- in the region of the measured 250 ms open.
-  readonly property real springOmegaRelease: 2 * Math.PI / Motion.smooth.response
+  readonly property real springOmega: 28
 
   FrameAnimation {
     id: progressSpring
@@ -521,29 +511,8 @@ Item {
 
   function stepSpring(dt) {
     const next = root.springStep(root.progress, root.springVelocity, root.springTarget, root.springOmega, dt);
-    let x = next[0];
-    let v = next[1];
-    if (!root.tracking && Math.abs(root.springTarget - x) < 0.001 && Math.abs(v) < 0.01) {
-      x = root.springTarget;
-      v = 0;
-      progressSpring.stop();
-    }
-    root.springVelocity = v;
-    root.progress = x;
-  }
-
-  // Milliseconds until the release spring is within 1.5% of its target.
-  function springSettleTime() {
-    const w = root.springOmegaRelease;
-    let x = root.progress - root.springTarget;
-    let v = root.springVelocity;
-    let t = 0;
-    while (t < 1.5 && (Math.abs(x) > 0.015 || Math.abs(v) > 0.2)) {
-      v += (-w * w * x - 2 * w * v) * 0.004;
-      x += v * 0.004;
-      t += 0.004;
-    }
-    return Math.round(t * 1000);
+    root.springVelocity = next[1];
+    root.progress = next[0];
   }
 
   // --- sideways swipe between desktops ---------------------------------------
@@ -561,7 +530,6 @@ Item {
   property real slide: 0
   property real slideTarget: 0
   property real slideVelocity: 0 // pages per second
-  property real slideOmega: root.springOmegaTracking
   property bool slideTracking: false
   property real slideStart: 0
   property real slideTravel: 0
@@ -578,21 +546,24 @@ Item {
 
   signal slideRequested(int dir)
 
+  // The same finger filter for the sideways swipe; the release is an animation.
   FrameAnimation {
     id: slideSpring
     onTriggered: {
-      const next = root.springStep(root.slide, root.slideVelocity, root.slideTarget, root.slideOmega,
+      const next = root.springStep(root.slide, root.slideVelocity, root.slideTarget, root.springOmega,
                                    Math.min(frameTime, 1 / 30));
-      let x = next[0];
-      let v = next[1];
-      if (!root.slideTracking && Math.abs(root.slideTarget - x) < 0.001 && Math.abs(v) < 0.01) {
-        x = root.slideTarget;
-        v = 0;
-        slideSpring.stop();
-      }
-      root.slideVelocity = v;
-      root.slide = x;
+      root.slideVelocity = next[1];
+      root.slide = next[0];
     }
+  }
+  // Pages travel from A to B: ease-in-out, `base` for a whole page and less
+  // for the rest of a released swipe.
+  NumberAnimation {
+    id: slideAnim
+    target: root
+    property: "slide"
+    easing.type: Easing.BezierSpline
+    easing.bezierCurve: Motion.easeInOut
   }
 
   Timer {
@@ -613,6 +584,7 @@ Item {
 
   function resetSlide() {
     slideSpring.stop();
+    slideAnim.stop();
     slideWatchdog.stop();
     root.slideTracking = false;
     root.slidePendingDir = 0;
@@ -621,16 +593,21 @@ Item {
     root.slideVelocity = 0;
   }
 
-  // Release towards `target`, on the slower spring, never overshooting it.
+  // Glide to `target` from wherever the page is now.
   function settleSlide(target) {
+    slideSpring.stop();
+    slideAnim.stop();
+    root.slideVelocity = 0;
     root.slideTarget = target;
-    root.slideOmega = root.springOmegaRelease;
     const dist = Math.abs(target - root.slide);
-    const toward = (target - root.slide) * root.slideVelocity;
-    const cap = root.springOmegaRelease * dist;
-    if (toward > 0 && Math.abs(root.slideVelocity) > cap)
-      root.slideVelocity = Math.sign(root.slideVelocity) * cap;
-    slideSpring.start();
+    if (Motion.reduced || dist < 0.001) {
+      root.slide = target;
+      return;
+    }
+    slideAnim.from = root.slide;
+    slideAnim.to = target;
+    slideAnim.duration = Math.max(Motion.fast, Math.round(Motion.base * Math.sqrt(Math.min(1, dist))));
+    slideAnim.start();
   }
 
   // The desktop changed by `step` while shown: keep every page where it is.
@@ -652,9 +629,9 @@ Item {
         return;
       root.slideTracking = true;
       slideWatchdog.restart();
-      if (!slideSpring.running)
-        root.slideVelocity = 0;
-      root.slideOmega = root.springOmegaTracking;
+      slideAnim.stop();
+      root.slideVelocity = 0;
+      root.slideTarget = root.slide;
       root.slideStart = root.slideTarget;
       root.slideTravel = 0;
       root.slideTrackVelocity = 0;
@@ -762,11 +739,9 @@ Item {
 
   function handleGesture(phase, value, time) {
     if (phase === "start") {
-      progressAnim.stop();
-      if (!progressSpring.running)
-        root.springVelocity = 0;
+      progressTween.stop();
+      root.springVelocity = 0;
       root.springTarget = root.progress;
-      root.springOmega = root.springOmegaTracking;
       collapseThenHide.stop();
       fadeOutSoon.stop();
       expandFallback.stop();
@@ -791,7 +766,6 @@ Item {
         Hyprland.refreshWorkspaces();
         Hyprland.refreshToplevels();
         if (!decoProbe.running) decoProbe.running = true;
-      if (!animProbe.running) animProbe.running = true;
         root.showSelection = false;
         root.shown = true;
       }
@@ -927,12 +901,11 @@ Item {
       Hyprland.refreshWorkspaces();
       Hyprland.refreshToplevels();
       if (!decoProbe.running) decoProbe.running = true;
-      if (!animProbe.running) animProbe.running = true;
       root.showSelection = false;
       root.contentVisible = true;
-      // Reduce Motion: the surface fades in over the desktop instead of the
+      // Reduced motion: the surface fades in over the desktop instead of the
       // windows shrinking out of it.
-      if (Motion.reduceMotion) {
+      if (Motion.reduced) {
         root.contentOpacity = 0;
         contentFadeIn.restart();
       }
@@ -953,7 +926,7 @@ Item {
       expandFallback.stop();
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
-      const dur = (progressAnim.running || progressSpring.running) ? root.progressAnimDuration : 0;
+      const dur = progressTween.running ? root.progressAnimDuration : 0;
       // The curve is ~98.8% home at fadeStartAt: the copy is then
       // indistinguishable from the desktop, so a short fade over the tail hands
       // over without the full-size copy lingering on screen.
@@ -1000,47 +973,6 @@ Item {
     const text = String(value || "");
     const bare = text.startsWith("0x") ? text.slice(2) : text;
     return /^[0-9a-fA-F]{1,16}$/.test(bare) ? "0x" + bare : "";
-  }
-
-  // Switching and closing are one action, but the dispatch travels over a
-  // socket -- hiding in the same tick can cut it off, so give it a frame.
-  signal desktopRequested(int id)
-  property bool travelHandled: false
-  function goToWorkspace(id) {
-    const target = root.safeWorkspaceId(id);
-    if (target === "")
-      return;
-    // The focused monitor's panel travels there (see onDesktopRequested);
-    // without one, plain switch and close.
-    root.travelHandled = false;
-    root.desktopRequested(Number(id));
-    if (root.travelHandled)
-      return;
-    root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })", "workspace " + target);
-    hideSoon.start();
-  }
-
-  // Hyprland's own workspace slide (animations:workspaces, speed in
-  // deciseconds), read on each open: the close after a travel is timed so it
-  // ends when that slide ends, so the crossfade lands on a settled desktop.
-  property int workspaceAnimMs: 400
-  Process {
-    id: animProbe
-    command: ["/usr/bin/hyprctl", "-j", "animations"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          const d = JSON.parse(String(text || "[]"));
-          const list = Array.isArray(d) && Array.isArray(d[0]) ? d[0] : [];
-          for (let i = 0; i < list.length; i++) {
-            if (list[i].name !== "workspaces")
-              continue;
-            const speed = Number(list[i].speed);
-            root.workspaceAnimMs = list[i].enabled && isFinite(speed) && speed > 0 ? Math.round(speed * 100) : 0;
-          }
-        } catch (e) {}
-      }
-    }
   }
 
   // HyprlandToplevel.address is the bare pointer -- "55c058e3d1d0" -- while
@@ -1213,24 +1145,23 @@ Item {
         target: root
         function onShownChanged() {
           if (root.shown) {
-            // With a single desktop macOS shows its thumbnail straight away
-            // (measured: the recording's strip has the thumbnail and the "+"
-            // from the first frame); the strip only folds to names when
-            // there are several.
-            panel.stripExpanded = panel.slotIds.length <= 1;
-            // A FrameAnimation does not run in a hidden window, so the fold
-            // ordered on the last close never happened: snap it now.
-            stripOpen.snap(stripOpen.to);
+            // The thumbnails are there from the first frame (Henri: the strip
+            // is open the moment F8 is pressed, no unfolding on hover).
+            panel.stripExpanded = true;
+            // Everything in the strip snaps into place while hidden and only
+            // animates from here on.
+            panel.stripAnimates = true;
             if (panel.capturesReady) panel.revealed = true;
             else revealTimeout.restart();
           } else {
+            panel.stripAnimates = false;
             revealTimeout.stop();
             panel.revealed = false;
             panel.finishReorder();
             panel.dragTile = -1;
             panel.dragSlot = -1;
             panel.resetTileOrder();
-            // Back to the way macOS opens: strip folded, nothing peeked.
+            // Folded while hidden: nothing in it captures then.
             panel.stripExpanded = false;
             panel.peek = -1;
             panel.altHeld = false;
@@ -1238,7 +1169,6 @@ Item {
             panel.dropSlot = -2;
             panel.transitDesk = -1;
             panel.transitFrom = -1;
-            closeAfterTravel.stop();
           }
         }
       }
@@ -1261,7 +1191,7 @@ Item {
       }
       Timer {
         id: hiddenRecapture
-        interval: Motion.slow
+        interval: 250
         onTriggered: panel.recaptureHidden()
       }
       Timer {
@@ -1537,24 +1467,19 @@ Item {
       property var slotIds: []
       // tileOrder[slot] = tile index.
       property var tileOrder: []
-      signal tilesSnap()
 
       function setSlotIds(ids) {
         if (root.sameList(panel.slotIds, ids))
           return;
-        const resized = ids.length !== panel.slotIds.length;
         // Order first: the tile Repeater follows slotIds.length, and every tile
         // must find itself in tileOrder when it is created.
-        if (resized)
+        if (ids.length !== panel.slotIds.length)
           panel.tileOrder = ids.map((_, i) => i);
         panel.slotIds = ids;
-        if (resized)
-          panel.tilesSnap();
       }
 
       function resetTileOrder() {
         panel.tileOrder = panel.slotIds.map((_, i) => i);
-        panel.tilesSnap();
       }
 
       function deskById(id) {
@@ -1957,7 +1882,16 @@ Item {
         // Following a desktop's windows to their new slot is not a switch.
         if (panel.reorderPending || panel.removePending)
           return;
-        if (!panel.slideOwner || !root.shown || old < 0 || i < 0 || i === old)
+        if (!root.shown || old < 0 || i < 0 || i === old)
+          return;
+        // The selection starts over on the desktop you landed on. The window
+        // list holds the neighbours' windows too, so it often does not change
+        // on a switch -- and a selection left on the old desktop's window sent
+        // Enter straight back there.
+        panel.selected = panel.firstOnScreen();
+        panel.peek = -1;
+        root.showSelection = false;
+        if (!panel.slideOwner)
           return;
         const step = root.slidePendingDir !== 0 ? root.slidePendingDir : i - old;
         root.slidePendingDir = 0;
@@ -1966,59 +1900,21 @@ Item {
         root.rebaseSlide(step);
       }
 
-      // A click on a desktop thumbnail (or its number key): the overview
-      // slides over to that desktop, its windows already drawn beside this
-      // one, and closes into it -- the close timed so it ends together with
-      // Hyprland's own workspace slide underneath, which the overlay hides.
-      Connections {
-        target: root
-        function onDesktopRequested(id) {
-          if (!panel.slideOwner)
-            return;
-          root.travelHandled = true;
-          const cur = panel.currentDesktop;
-          const ci = cur ? panel.deskIndexOf(cur.id) : -1;
-          const ti = panel.deskIndexOf(id);
-          if (ci < 0 || ti < 0 || ci === ti) {
-            root.dismiss();
-            return;
-          }
-          const target = root.safeWorkspaceId(id);
-          if (target === "")
-            return;
-          const step = ti - ci;
-          panel.transitFrom = cur.id;
-          panel.transitDesk = id;
-          root.slidePendingDir = step;
-          root.settleSlide(-step);
-          root.dispatch("hl.dsp.focus({ workspace = \"" + target + "\" })", "workspace " + target);
-          closeAfterTravel.interval = Math.max(16, root.workspaceAnimMs - root.unshrinkDuration);
-          closeAfterTravel.restart();
-        }
-      }
-      Timer {
-        id: closeAfterTravel
-        onTriggered: if (root.opened) root.dismiss()
-      }
-
       // --- geometry ---------------------------------------------------------
       // Proportions taken off a real Mission Control screenshot: the Spaces
       // strip is about a sixth of the screen, and the thumbnails in it about
       // two thirds of the strip, leaving room for a label underneath.
       readonly property real uiScale: panel.width / 1920
-      // The strip opens folded, showing only the desktops' names, and unfolds
-      // into thumbnails when the pointer touches it or a window is dragged
-      // towards it (macOS). Once unfolded it stays so until the overview
-      // closes. The windows underneath move down a little to make room.
+      // Unfolded (thumbnails) whenever the overview is up, folded to the
+      // labels only while hidden, so nothing in it captures then. Its height
+      // is never animated (spec): it snaps, the thumbnails fade and rise into
+      // it, and the labels and the windows underneath travel to their places.
       property bool stripExpanded: false
-      HUi.SpringValue {
-        id: stripOpen
-        to: panel.stripExpanded ? 1 : 0
-        preset: Motion.smooth
-      }
+      // False while hidden, so every strip transition snaps there.
+      property bool stripAnimates: false
       readonly property real stripFullH: Math.round(panel.height * 0.155)
       readonly property real stripCollapsedH: Math.round(panel.stripLabelBand + panel.stripPad * 2)
-      readonly property real stripH: root.lerp(panel.stripCollapsedH, panel.stripFullH, stripOpen.value)
+      readonly property real stripH: panel.stripExpanded ? panel.stripFullH : panel.stripCollapsedH
       readonly property real stripPad: Math.round(12 * uiScale)
       readonly property real stripGap: Math.round(22 * uiScale)
       readonly property int stripLabelSize: Math.max(9, Math.round(15 * uiScale))
@@ -2283,13 +2179,24 @@ Item {
       // theme foreground (dark in cupertino) would vanish against it.
       readonly property color overlayInk: "#ffffff"
 
-      // Desktop thumbnails: henri-ui's control radius, scaled with the rest of
-      // the overview geometry (which follows the screen, not the font).
-      readonly property real thumbRadius: Style.space(Motion.radiusControl * panel.uiScale)
+      // Scaled with the rest of the overview geometry (which follows the
+      // screen, not the font).
+      readonly property real thumbRadius: Style.space(8 * panel.uiScale)
+      readonly property real ringRadius: Style.space(10 * panel.uiScale)
+      readonly property real hairlineAlpha: 0.10
+      readonly property real secondaryInkAlpha: 0.65
 
       // --- selection --------------------------------------------------------
       // Index into panel.windows; -1 when the desktop is empty.
       property int selected: panel.windows.length > 0 ? 0 : -1
+      // The selected window's rect on screen, kept by its delegate; the
+      // selection ring below glides between them.
+      property real selX: 0
+      property real selY: 0
+      property real selW: 0
+      property real selH: 0
+      // An arrow key auto-repeating: the ring follows without a glide.
+      property bool keyRepeat: false
 
       // Windows sit wherever they sit, so arrow keys pick the nearest one in
       // that direction rather than stepping through a grid. Distance is
@@ -2484,6 +2391,7 @@ Item {
         // Keys.onPressed runs before the named handlers above, so this is where
         // anything that has to win over plain arrow navigation goes.
         Keys.onPressed: event => {
+          panel.keyRepeat = event.isAutoRepeat;
           if (event.key === Qt.Key_Alt) {
             panel.altHeld = true;
             event.accepted = true;
@@ -2518,8 +2426,8 @@ Item {
         }
       }
 
-      // Switch desktop but stay open. Not goToWorkspace(), which quits: the
-      // point of walking the strip is to look before you leap.
+      // Switch desktop but stay open: the point of walking the strip is to
+      // look before you leap.
       function stepDesktop(dir) {
         const n = panel.desktops.length;
         if (n === 0)
@@ -2562,9 +2470,13 @@ Item {
         panel.peek = -1;
       }
 
+      // Enter: the selected window, if it is on this desktop; otherwise just
+      // close here (never focus a window on another desktop, which would
+      // switch back).
       function activateSelection() {
-        if (panel.selected >= 0 && panel.selected < panel.windows.length)
-          root.focusWindow(String(panel.windows[panel.selected].address));
+        const i = panel.selected;
+        if (i >= 0 && i < panel.windows.length && panel.pageOf(panel.windows[i]) === 0)
+          root.focusWindow(String(panel.windows[i].address));
         else
           root.dismiss();
       }
@@ -2582,16 +2494,17 @@ Item {
         // shrinking.
 
         // --- Spaces strip ---------------------------------------------------
-        // Only Mission Control has the strip. A mode switch while up slides
-        // it in or out on its own spring; on open it rides the progress.
-        HUi.SpringValue {
-          id: stripIn
-          to: root.missionMode ? 1 : 0
-          preset: Motion.smooth
-        }
-        Connections {
-          target: root
-          function onShownChanged() { if (root.shown) stripIn.snap(stripIn.to) }
+        // Only Mission Control has the strip. A mode switch while up brings
+        // it down 16 px with a fade, or takes it away the same way (spec, side
+        // panel); on open it rides the progress instead.
+        property real stripIn: root.missionMode ? 1 : 0
+        Behavior on stripIn {
+          enabled: panel.stripAnimates
+          NumberAnimation {
+            duration: root.missionMode ? Motion.d(Motion.base) : Motion.d(Motion.fast)
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: root.missionMode ? Motion.easeOut : Motion.easeIn
+          }
         }
 
         Rectangle {
@@ -2601,8 +2514,8 @@ Item {
           // Slides down from off-screen as the desktop shrinks to make room for
           // it, which is where macOS puts the motion. Driven by stripProgress,
           // which holds it in place on a non-swipe close -- see stripHold.
-          readonly property real reveal: root.stripProgress * stripIn.value
-          y: root.lerp(-panel.stripH, 0, strip.reveal)
+          readonly property real reveal: root.stripProgress * stage.stripIn
+          y: root.lerp(-panel.stripH, 0, root.stripProgress) - Motion.px(Motion.distanceLg) * (1 - stage.stripIn)
           opacity: strip.reveal
           visible: strip.reveal > 0.001
           color: Qt.rgba(1, 1, 1, 0.07)
@@ -2610,22 +2523,7 @@ Item {
           Rectangle {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: 1
-            color: Util.alpha(panel.overlayInk, Motion.hairlineAlpha)
-          }
-
-          // The pointer touching the strip unfolds it. Not before the windows
-          // have settled: while they are still shrinking the strip is sliding
-          // in under a stationary pointer, which is not a touch.
-          HoverHandler {
-            id: stripHover
-            onHoveredChanged: if (hovered && root.settled) panel.stripExpanded = true
-          }
-          // ...and a pointer that was already up here while the windows were
-          // still settling: there is no second hover event for it, so the
-          // settling itself is the touch.
-          Connections {
-            target: root
-            function onSettledChanged() { if (root.settled && stripHover.hovered && root.missionMode) panel.stripExpanded = true }
+            color: Util.alpha(panel.overlayInk, panel.hairlineAlpha)
           }
 
           // Top of the thumbnail row, centred in the unfolded strip.
@@ -2649,9 +2547,16 @@ Item {
               readonly property var desk: panel.deskById(slotLabel.wsId)
               readonly property bool marked: panel.displayOrder[slotLabel.index] === panel.focusedTile
               x: panel.stripRowX + slotLabel.index * panel.stripPitch
-              // Folded: on their own in the band. Unfolding, they move down
-              // under the thumbnails growing out of them.
-              y: root.lerp(strip.foldedLabelY, strip.rowY + panel.stripTileH, stripOpen.value)
+              // Folded: on their own in the band. Unfolding, they travel down
+              // under the thumbnails (text is moved, never scaled).
+              y: panel.stripExpanded ? strip.rowY + panel.stripTileH : strip.foldedLabelY
+              Behavior on y {
+                enabled: panel.stripAnimates
+                NumberAnimation {
+                  duration: Motion.travel(Motion.base)
+                  easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut
+                }
+              }
               width: panel.stripTileW
               height: panel.stripLabelBand
               horizontalAlignment: Text.AlignHCenter
@@ -2666,10 +2571,10 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: panel.stripLabelSize
               color: slotLabel.marked ? panel.overlayInk
-                                      : Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
+                                      : Util.alpha(panel.overlayInk, panel.secondaryInkAlpha)
               Behavior on color {
                 ColorAnimation {
-                  duration: slotLabel.marked ? Motion.instant : Motion.fast
+                  duration: Motion.instant
                   easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                 }
               }
@@ -2696,6 +2601,11 @@ Item {
               readonly property bool isFocused: panel.focusedTile === deskCell.index
 
               // --- drag to reorder ---------------------------------------
+              // Held: pinned to the pointer, no transition. Released: glides
+              // to its slot in `fast` ease-out; the neighbours making room
+              // travel in `base` ease-in-out (spec, drag & drop). Explicit
+              // animations rather than Behaviors, so the pointer never runs
+              // through one and a glide always starts from where the tile is.
               readonly property bool held: deskDrag.active
               // Released and still flying home: stays on top of its neighbours.
               property bool landing: false
@@ -2705,53 +2615,80 @@ Item {
               property real dragDX: 0
               property real dragDY: 0
               readonly property real slotX: panel.stripRowX + Math.max(0, deskCell.shownSlot) * panel.stripPitch
+              // Vertical offset while held, and on the way home.
+              property real dragY: 0
 
-              // Held: pinned to the pointer. Otherwise the tile glides to its
-              // slot -- smooth for the neighbours making room, snappy for the
-              // dropped one settling in, carrying the release speed.
-              HUi.SpringValue {
-                id: xSpring
-                to: deskCell.held ? deskCell.dragHomeX + deskCell.dragDX : deskCell.slotX
-                preset: deskCell.held || deskCell.landing ? Motion.snappy : Motion.smooth
-                epsilon: 0.5
-                onRunningChanged: deskCell.checkLanded()
+              NumberAnimation {
+                id: xGlide
+                target: deskCell
+                property: "x"
+                easing.type: Easing.BezierSpline
+                onRunningChanged: if (!running && !yGlide.running) deskCell.landing = false
               }
-              HUi.SpringValue {
-                id: ySpring
-                to: deskCell.held ? deskCell.dragDY : 0
-                preset: Motion.snappy
-                epsilon: 0.5
-                onRunningChanged: deskCell.checkLanded()
+              NumberAnimation {
+                id: yGlide
+                target: deskCell
+                property: "dragY"
+                to: 0
+                duration: Motion.fast
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: Motion.easeOut
+                onRunningChanged: if (!running && !xGlide.running) deskCell.landing = false
               }
-              HUi.SpringValue {
-                id: liftSpring
-                to: deskCell.held ? Motion.liftScale : 1
-                preset: Motion.snappy
+              function glideX(to) {
+                xGlide.stop();
+                if (!panel.stripAnimates || Motion.reduced || Math.abs(to - deskCell.x) < 0.5) {
+                  deskCell.x = to;
+                  return;
+                }
+                xGlide.from = deskCell.x;
+                xGlide.to = to;
+                xGlide.duration = deskCell.landing ? Motion.fast : Motion.base;
+                xGlide.easing.bezierCurve = deskCell.landing ? Motion.easeOut : Motion.easeInOut;
+                xGlide.start();
               }
+              function glideHome() {
+                yGlide.stop();
+                if (!panel.stripAnimates || Motion.reduced) {
+                  deskCell.dragY = 0;
+                  return;
+                }
+                yGlide.from = deskCell.dragY;
+                yGlide.start();
+              }
+              onSlotXChanged: if (!deskCell.held) deskCell.glideX(deskCell.slotX)
+              onDragDXChanged: if (deskCell.held) deskCell.x = deskCell.dragHomeX + deskCell.dragDX
+              onDragDYChanged: if (deskCell.held) deskCell.dragY = deskCell.dragDY
 
-              function checkLanded() {
-                if (!xSpring.running && !ySpring.running)
-                  deskCell.landing = false;
-              }
-
-              Connections {
-                target: panel
-                function onTilesSnap() {
-                  xSpring.snap(xSpring.to);
-                  ySpring.snap(ySpring.to);
-                  deskCell.landing = false;
+              // Unfolding: the thumbnails fade in and rise 8 px, staggered in
+              // reading order; folding is one fade, no stagger.
+              property real unfold: panel.stripExpanded ? 1 : 0
+              Behavior on unfold {
+                enabled: panel.stripAnimates
+                SequentialAnimation {
+                  PauseAnimation { duration: panel.stripExpanded ? Motion.stagger(deskCell.shownSlot) : 0 }
+                  NumberAnimation {
+                    duration: panel.stripExpanded ? Motion.d(Motion.base) : Motion.d(Motion.fast)
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: panel.stripExpanded ? Motion.easeOut : Motion.easeIn
+                  }
                 }
               }
+              // Hover (and held): scale 1.02 and a 2 px lift, `instant` both ways.
+              readonly property bool lit: deskHover.hovered || deskCell.held
+              property real lift: deskCell.lit ? -Motion.px(Motion.hoverLift) : 0
+              Behavior on lift {
+                NumberAnimation { duration: Motion.instant; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
+              }
+              scale: deskCell.lit ? Motion.sc(Motion.scaleHover) : 1
+              Behavior on scale {
+                NumberAnimation { duration: Motion.instant; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
+              }
 
-              x: xSpring.value
-              y: strip.rowY + ySpring.value
+              y: strip.rowY + Motion.px(Motion.distanceMd) * (1 - deskCell.unfold) + deskCell.lift + deskCell.dragY
               z: deskCell.held || deskCell.landing ? 2 : 0
-              // Folded away: the thumbnails grow out of their labels as the
-              // strip unfolds (macOS), so they scale up from the bottom.
-              transformOrigin: Item.Bottom
-              scale: liftSpring.value * root.lerp(0.6, 1, stripOpen.value)
-              opacity: stripOpen.value
-              visible: stripOpen.value > 0.001
+              opacity: deskCell.unfold
+              visible: deskCell.unfold > 0.001
 
               // A window being dragged over this desktop: it stands out.
               readonly property bool dropHover: panel.dragWindow >= 0 && panel.dropSlot === deskCell.shownSlot
@@ -2760,7 +2697,10 @@ Item {
               // Held during a reorder -- the tile keeps showing what it showed
               // until Hyprland has moved the windows to match it.
               onDeskWindowsLiveChanged: if (!panel.reorderPending && !root.sameList(deskCell.deskWindows, deskCell.deskWindowsLive)) deskCell.deskWindows = deskCell.deskWindowsLive
-              Component.onCompleted: deskCell.deskWindows = deskCell.deskWindowsLive
+              Component.onCompleted: {
+                deskCell.x = deskCell.slotX;
+                deskCell.deskWindows = deskCell.deskWindowsLive;
+              }
               Connections {
                 target: panel
                 // Same windows, maybe in a new stacking order: keep the array,
@@ -2884,7 +2824,7 @@ Item {
                     opacity: deskCell.isFocused ? 0.0 : (deskHover.hovered || deskCell.held || deskCell.dropHover ? 0.10 : 0.28)
                     Behavior on opacity {
                       NumberAnimation {
-                        duration: deskHover.hovered ? Motion.instant : Motion.fast
+                        duration: Motion.instant
                         easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                       }
                     }
@@ -2917,7 +2857,7 @@ Item {
                               : Util.alpha(panel.overlayInk, 0.16)
                   Behavior on border.color {
                     ColorAnimation {
-                      duration: deskHover.hovered ? Motion.instant : Motion.fast
+                      duration: Motion.instant
                       easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                     }
                   }
@@ -2930,8 +2870,8 @@ Item {
                 Rectangle {
                   id: closeBadge
                   readonly property bool wanted: panel.slotIds.length > 1 && Hyprland.usingLua && !deskCell.held
-                      && ((deskHover.hovered && stripOpen.value > 0.9) || panel.altHeld)
-                  width: Math.max(Motion.controlMin, Math.round(22 * panel.uiScale))
+                      && ((deskHover.hovered && deskCell.unfold > 0.9) || panel.altHeld)
+                  width: Math.max(20, Math.round(22 * panel.uiScale))
                   height: width
                   radius: width / 2
                   x: -Math.round(width * 0.35)
@@ -2942,22 +2882,17 @@ Item {
                   border.color: Qt.rgba(0, 0, 0, 0.25)
                   opacity: closeBadge.wanted ? 1 : 0
                   visible: opacity > 0.001
-                  scale: closeBadge.wanted ? 1 : Motion.iconFromScale
+                  // A small element: `fast` in, `instant` out.
                   Behavior on opacity {
                     NumberAnimation {
-                      duration: closeBadge.wanted ? Motion.instant : Motion.fast
-                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
-                    }
-                  }
-                  Behavior on scale {
-                    NumberAnimation {
-                      duration: closeBadge.wanted ? Motion.instant : Motion.fast
-                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                      duration: closeBadge.wanted ? Motion.d(Motion.fast) : Motion.instant
+                      easing.type: Easing.BezierSpline
+                      easing.bezierCurve: closeBadge.wanted ? Motion.easeOut : Motion.easeIn
                     }
                   }
                   Behavior on color {
                     ColorAnimation {
-                      duration: badgeArea.containsMouse ? Motion.instant : Motion.fast
+                      duration: Motion.instant
                       easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                     }
                   }
@@ -2977,7 +2912,9 @@ Item {
                 }
 
                 HoverHandler { id: deskHover }
-                TapHandler { onTapped: if (deskCell.wsId >= 0) root.goToWorkspace(deskCell.wsId) }
+                // Switches the desktop and stays open, like the arrow and
+                // number keys (Henri: switching and closing at once felt wrong).
+                TapHandler { onTapped: if (deskCell.wsId >= 0) panel.switchTo(deskCell.wsId) }
 
                 // Positions are read off the scene, not the handler's own
                 // translation: the tile moves under the pointer, and a
@@ -2992,21 +2929,22 @@ Item {
                   cursorShape: Qt.ClosedHandCursor
                   onActiveChanged: {
                     if (active) {
-                      deskCell.dragHomeX = xSpring.value;
+                      xGlide.stop();
+                      yGlide.stop();
+                      deskCell.landing = false;
+                      deskCell.dragHomeX = deskCell.x;
                       deskCell.dragOriginX = centroid.scenePosition.x;
                       deskCell.dragOriginY = centroid.scenePosition.y;
                       deskCell.dragDX = 0;
                       deskCell.dragDY = 0;
-                      xSpring.snap(xSpring.to);
-                      ySpring.snap(ySpring.to);
+                      deskCell.dragY = 0;
                       panel.dragTile = deskCell.index;
                       panel.dragSlot = deskCell.homeSlot;
                     } else {
                       deskCell.landing = true;
-                      const cap = Motion.maximumFlickVelocity;
-                      xSpring.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.x));
-                      ySpring.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.y));
                       panel.endDrag(deskCell.index);
+                      deskCell.glideX(deskCell.slotX);
+                      deskCell.glideHome();
                     }
                   }
                   onCentroidChanged: {
@@ -3014,20 +2952,10 @@ Item {
                       return;
                     deskCell.dragDX = centroid.scenePosition.x - deskCell.dragOriginX;
                     deskCell.dragDY = centroid.scenePosition.y - deskCell.dragOriginY;
-                    xSpring.snap(xSpring.to);
-                    ySpring.snap(ySpring.to);
                     // The slot under the tile's centre.
                     const centre = deskCell.dragHomeX + deskCell.dragDX + panel.stripTileW / 2;
                     const slot = Math.floor((centre - panel.stripRowX + panel.stripGap / 2) / panel.stripPitch);
                     panel.dragSlot = Math.max(0, Math.min(panel.slotIds.length - 1, slot));
-                  }
-                }
-
-                scale: deskHover.hovered && !deskCell.held ? 1.03 : 1.0
-                Behavior on scale {
-                  NumberAnimation {
-                    duration: deskHover.hovered ? Motion.instant : Motion.fast
-                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                   }
                 }
               }
@@ -3040,8 +2968,21 @@ Item {
             id: plusTile
             readonly property bool dropHover: panel.dragWindow >= 0 && panel.dropSlot === -1
             readonly property bool lit: plusHover.hovered || plusTile.dropHover
+            // Unfolds with the thumbnails, last in the row.
+            property real unfold: panel.stripExpanded ? 1 : 0
+            Behavior on unfold {
+              enabled: panel.stripAnimates
+              SequentialAnimation {
+                PauseAnimation { duration: panel.stripExpanded ? Motion.stagger(panel.slotIds.length) : 0 }
+                NumberAnimation {
+                  duration: panel.stripExpanded ? Motion.d(Motion.base) : Motion.d(Motion.fast)
+                  easing.type: Easing.BezierSpline
+                  easing.bezierCurve: panel.stripExpanded ? Motion.easeOut : Motion.easeIn
+                }
+              }
+            }
             x: panel.plusX
-            y: strip.rowY
+            y: strip.rowY + Motion.px(Motion.distanceMd) * (1 - plusTile.unfold)
             width: panel.plusW
             height: panel.stripTileH
             radius: panel.thumbRadius
@@ -3049,19 +2990,17 @@ Item {
             border.width: Math.max(1, Math.round(2 * panel.uiScale))
             border.color: plusTile.dropHover ? Color.accent
                         : Util.alpha(panel.overlayInk, plusTile.lit ? 0.55 : 0.16)
-            opacity: stripOpen.value * (panel.plusVisible ? 1 : 0)
+            opacity: plusTile.unfold * (panel.plusVisible ? 1 : 0)
             visible: opacity > 0.001
-            transformOrigin: Item.Bottom
-            scale: root.lerp(0.6, 1, stripOpen.value) * (plusTap.pressed ? Motion.pressScale : 1)
             Behavior on color {
               ColorAnimation {
-                duration: plusTile.lit ? Motion.instant : Motion.fast
+                duration: Motion.instant
                 easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
               }
             }
             Behavior on border.color {
               ColorAnimation {
-                duration: plusTile.lit ? Motion.instant : Motion.fast
+                duration: Motion.instant
                 easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
               }
             }
@@ -3160,49 +3099,38 @@ Item {
               readonly property real realX: win.onScreen ? win.screenX : win.slot.x
               readonly property real realY: win.onScreen ? win.screenY : win.slot.y
 
-              // The overview rect glides when the layout changes while the
+              // The overview rect travels when the layout changes while the
               // overview is up -- the strip unfolding, a mode switch, a window
-              // closing -- on springs, so an interrupted move keeps its speed.
-              // Snapped on open: there the shrink itself is the animation.
-              HUi.SpringValue { id: tX; to: win.slot.x; preset: Motion.smooth; epsilon: 0.5 }
-              HUi.SpringValue { id: tY; to: win.slot.y; preset: Motion.smooth; epsilon: 0.5 }
-              HUi.SpringValue { id: tS; to: win.slot.s; preset: Motion.smooth }
-              // Every spring here is a FrameAnimation, and a hidden window
-              // renders no frames: a target that moved while the overview was
-              // hidden (a window resized, the strip folding on close, a Quick
-              // Look interrupted) leaves the spring stuck at its old value
-              // until the next open -- when it then glides from there, which
-              // read as the windows jumping off towards a corner at the start
-              // of a swipe. So: snapped on open, and snapped on every layout
-              // change until the overview has settled. Only a settled
-              // overview glides (the strip unfolding, a mode switch, a drag).
-              function snapTarget() {
-                tX.snap(tX.to);
-                tY.snap(tY.to);
-                tS.snap(tS.to);
-                peekT.snap(peekT.to);
-                dX.snap(dX.to);
-                dY.snap(dY.to);
-                dS.snap(dS.to);
+              // closing -- `base` ease-in-out from wherever it is. Only once
+              // settled: before that the shrink itself is the animation, and a
+              // target that moved while hidden (a window resized, the strip
+              // folding on close) has to snap, or the windows would set off
+              // towards a corner at the start of the next open.
+              property real targetX: win.slot.x
+              property real targetY: win.slot.y
+              property real targetS: win.slot.s
+              Behavior on targetX {
+                enabled: root.settled
+                NumberAnimation { duration: Motion.travel(Motion.base); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
               }
-              Connections {
-                target: root
-                function onShownChanged() { if (root.shown) win.snapTarget() }
+              Behavior on targetY {
+                enabled: root.settled
+                NumberAnimation { duration: Motion.travel(Motion.base); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
               }
-              Connections {
-                target: panel
-                function onLayoutChanged() { if (!root.settled) win.snapTarget() }
+              Behavior on targetS {
+                enabled: root.settled
+                NumberAnimation { duration: Motion.travel(Motion.base); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
               }
-              readonly property real targetX: tX.value
-              readonly property real targetY: tY.value
-              readonly property real targetS: tS.value
               readonly property real targetW: win.realW * win.targetS
               readonly property real targetH: win.realH * win.targetS
 
               // Quick Look (Space): grown to fill most of the exposé area, never
-              // past its real size.
+              // past its real size. There and back is a move from A to B.
               readonly property bool peeking: panel.peek === win.idx
-              HUi.SpringValue { id: peekT; to: win.peeking ? 1 : 0; preset: Motion.smooth }
+              property real peekT: win.peeking ? 1 : 0
+              Behavior on peekT {
+                NumberAnimation { duration: Motion.travel(Motion.base); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
+              }
               readonly property real peekS: Math.min(1, panel.peekAreaW / Math.max(1, win.realW),
                                                      panel.peekAreaH / Math.max(1, win.realH))
               readonly property real peekX: panel.peekAreaX + (panel.peekAreaW - win.realW * win.peekS) / 2
@@ -3210,10 +3138,11 @@ Item {
 
               // Drag to a desktop in the strip. The offset is measured from
               // where the drag activated, so the window does not jump by the
-              // drag threshold; while held it is pinned to the pointer, dropped
-              // anywhere else it springs home with the release speed, dropped
-              // on a desktop it stays there and dissolves (Hyprland moves the
-              // real window, and this copy leaves with it).
+              // drag threshold; while held it is pinned to the pointer with no
+              // transition, dropped anywhere else it glides home in `fast`
+              // ease-out (spec, drag & drop), dropped on a desktop it stays
+              // there and dissolves (Hyprland moves the real window, and this
+              // copy leaves with it).
               readonly property bool held: winDrag.active
               property bool landing: false
               property bool dropped: false
@@ -3221,31 +3150,32 @@ Item {
               property real dragOriginY: 0
               property real dragDX: 0
               property real dragDY: 0
-              HUi.SpringValue {
-                id: dX
-                to: win.held || win.dropped ? win.dragDX : 0
-                preset: Motion.snappy
-                epsilon: 0.5
-                onRunningChanged: win.checkLanded()
+              property real offX: 0
+              property real offY: 0
+              onDragDXChanged: if (win.held) win.offX = win.dragDX
+              onDragDYChanged: if (win.held) win.offY = win.dragDY
+              ParallelAnimation {
+                id: homeGlide
+                onRunningChanged: if (!running) win.landing = false
+                NumberAnimation { target: win; property: "offX"; to: 0; duration: Motion.fast; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
+                NumberAnimation { target: win; property: "offY"; to: 0; duration: Motion.fast; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
               }
-              HUi.SpringValue {
-                id: dY
-                to: win.held || win.dropped ? win.dragDY : 0
-                preset: Motion.snappy
-                epsilon: 0.5
-                onRunningChanged: win.checkLanded()
+              function glideHome() {
+                homeGlide.stop();
+                if (Motion.reduced) {
+                  win.offX = 0;
+                  win.offY = 0;
+                  return;
+                }
+                win.landing = true;
+                homeGlide.start();
               }
               // Over the strip the dragged window shrinks towards thumbnail
               // size, about its centre, so it shrinks under the pointer.
               readonly property bool overStrip: (win.held || win.dropped) && panel.dropSlot !== -2
-              HUi.SpringValue {
-                id: dS
-                to: win.overStrip ? Math.min(1, (panel.stripTileW / panel.monW) / Math.max(0.01, win.targetS)) : 1
-                preset: Motion.smooth
-              }
-              function checkLanded() {
-                if (!dX.running && !dY.running)
-                  win.landing = false;
+              property real dS: win.overStrip ? Math.min(1, (panel.stripTileW / panel.monW) / Math.max(0.01, win.targetS)) : 1
+              Behavior on dS {
+                NumberAnimation { duration: Motion.travel(Motion.fast); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
               }
 
               // The rect on screen this frame: open/close progress first, then
@@ -3254,10 +3184,10 @@ Item {
               readonly property real ovX: root.lerp(win.realX, win.targetX, win.p)
               readonly property real ovY: root.lerp(win.realY, win.targetY, win.p)
               readonly property real ovS: root.lerp(win.onScreen ? 1 : win.targetS * 0.92, win.targetS, win.p)
-              readonly property real baseS: root.lerp(win.ovS, win.peekS, peekT.value)
-              readonly property real fs: win.baseS * dS.value
-              readonly property real fx: root.lerp(win.ovX, win.peekX, peekT.value) + dX.value + win.realW * (win.baseS - win.fs) / 2
-              readonly property real fy: root.lerp(win.ovY, win.peekY, peekT.value) + dY.value + win.realH * (win.baseS - win.fs) / 2
+              readonly property real baseS: root.lerp(win.ovS, win.peekS, win.peekT)
+              readonly property real fs: win.baseS * win.dS
+              readonly property real fx: root.lerp(win.ovX, win.peekX, win.peekT) + win.offX + win.realW * (win.baseS - win.fs) / 2
+              readonly property real fy: root.lerp(win.ovY, win.peekY, win.peekT) + win.offY + win.realH * (win.baseS - win.fs) / 2
               readonly property real fw: win.realW * win.fs
               readonly property real fh: win.realH * win.fs
 
@@ -3269,10 +3199,10 @@ Item {
                   : Math.max(0, Math.min(1, (root.progress - 0.55) / 0.45))
 
               // Born while the overview was already up (a window opened, Tab
-              // to another app): fades in rather than popping.
+              // to another app): fades in and rises 4 px (spec, new list
+              // entry) rather than popping.
               property real born: 1
               Component.onCompleted: {
-                win.snapTarget();
                 if (root.settled) {
                   win.born = 0;
                   bornIn.start();
@@ -3283,12 +3213,19 @@ Item {
                 target: win
                 property: "born"
                 to: 1
-                duration: Motion.fast
+                duration: Motion.d(Motion.base)
                 easing.type: Easing.BezierSpline
                 easing.bezierCurve: Motion.easeOut
               }
 
               z: win.held || win.landing || win.dropped || win.peeking ? 2 : 0
+
+              // The selection ring lives outside the delegates (one ring that
+              // glides between windows); while selected, this rect feeds it.
+              Binding { target: panel; property: "selX"; value: win.fx; when: win.isSelected; restoreMode: Binding.RestoreNone }
+              Binding { target: panel; property: "selY"; value: win.fy; when: win.isSelected; restoreMode: Binding.RestoreNone }
+              Binding { target: panel; property: "selW"; value: win.fw; when: win.isSelected; restoreMode: Binding.RestoreNone }
+              Binding { target: panel; property: "selH"; value: win.fh; when: win.isSelected; restoreMode: Binding.RestoreNone }
 
               // The window itself. Its size never changes -- it stays at the real
               // size and is moved and scaled with a transform. Animating
@@ -3298,7 +3235,7 @@ Item {
               Item {
                 id: body
                 x: win.fx
-                y: win.fy
+                y: win.fy + Motion.px(Motion.distanceSm) * (1 - win.born)
                 width: win.realW
                 height: win.realH
                 transform: Scale {
@@ -3312,8 +3249,8 @@ Item {
                 Behavior on opacity {
                   enabled: win.dropped
                   NumberAnimation {
-                    duration: Motion.fast
-                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeExit
+                    duration: Motion.d(Motion.fast)
+                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeIn
                   }
                 }
 
@@ -3365,11 +3302,17 @@ Item {
                     paintCursor: false
                   }
 
-                  scale: win.isSelected && root.settled && root.showSelection && !win.peeking && !win.held ? 1.02 : 1.0
+                  // Selected (keyboard or pointer): the tile hover, scale 1.02
+                  // and a 2 px lift, `instant` both ways.
+                  readonly property bool lit: win.isSelected && root.settled && root.showSelection && !win.peeking && !win.held
+                  scale: shot.lit ? Motion.sc(Motion.scaleHover) : 1
                   Behavior on scale {
-                    NumberAnimation {
-                      duration: win.isSelected ? Motion.instant : Motion.fast
-                      easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    NumberAnimation { duration: Motion.instant; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
+                  }
+                  transform: Translate {
+                    y: shot.lit ? -Motion.px(Motion.hoverLift) : 0
+                    Behavior on y {
+                      NumberAnimation { duration: Motion.instant; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut }
                     }
                   }
                 }
@@ -3392,6 +3335,7 @@ Item {
                   // sliding under a stationary pointer, so every window they pass
                   // under would grab the selection.
                   onHoveredChanged: if (hovered && root.settled && win.page === 0 && Math.abs(root.slide) < 0.01 && panel.dragWindow < 0) {
+                    panel.keyRepeat = false;
                     root.showSelection = true;
                     panel.selected = win.idx;
                   }
@@ -3409,12 +3353,14 @@ Item {
                   cursorShape: Qt.ClosedHandCursor
                   onActiveChanged: {
                     if (active) {
+                      homeGlide.stop();
+                      win.landing = false;
                       win.dragOriginX = centroid.scenePosition.x;
                       win.dragOriginY = centroid.scenePosition.y;
                       win.dragDX = 0;
                       win.dragDY = 0;
-                      dX.snap(0);
-                      dY.snap(0);
+                      win.offX = 0;
+                      win.offY = 0;
                       panel.dragWindow = win.idx;
                       panel.dropSlot = -2;
                     } else {
@@ -3424,10 +3370,7 @@ Item {
                         win.dropped = true;
                         panel.moveWindowToSlot(String(win.handle.address), slot);
                       } else {
-                        win.landing = true;
-                        const cap = Motion.maximumFlickVelocity;
-                        dX.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.x));
-                        dY.velocity = Math.max(-cap, Math.min(cap, centroid.velocity.y));
+                        win.glideHome();
                       }
                       panel.dropSlot = -2;
                     }
@@ -3437,38 +3380,10 @@ Item {
                       return;
                     win.dragDX = centroid.scenePosition.x - win.dragOriginX;
                     win.dragDY = centroid.scenePosition.y - win.dragOriginY;
-                    dX.snap(dX.to);
-                    dY.snap(dY.to);
                     // Carried towards the strip: it unfolds to receive it.
                     if (centroid.scenePosition.y < panel.stripFullH)
                       panel.stripExpanded = true;
                     panel.dropSlot = panel.dropSlotAt(centroid.scenePosition.x, centroid.scenePosition.y);
-                  }
-                }
-              }
-
-              // Selection is a ring in the accent colour plus a nudge in size
-              // (macOS: a blue frame under the pointer). No fill and no dim on
-              // the others: in the exposé the windows are the content, and
-              // dimming five of six makes the whole view look switched off.
-              // Outside the scaled body so its border is not scaled down with it.
-              Rectangle {
-                x: win.fx
-                y: win.fy
-                width: win.fw
-                height: win.fh
-                scale: shot.scale
-                radius: Style.space(Motion.radiusPopover * panel.uiScale)
-                color: Util.alpha(Color.accent, 0)
-                border.width: Math.max(2, Math.round(3 * panel.uiScale))
-                // Gone the instant a close starts: left at the overview rect while
-                // the window grows back, it was a ghost frame on every close.
-                visible: root.settled && root.showSelection && !root.desktopMode && !win.dropped
-                border.color: Util.alpha(Color.accent, win.isSelected ? 0.95 : 0)
-                Behavior on border.color {
-                  ColorAnimation {
-                    duration: win.isSelected ? Motion.instant : Motion.fast
-                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                   }
                 }
               }
@@ -3494,7 +3409,9 @@ Item {
 
               // The title shows for the window under the pointer, the selected
               // one and the one in Quick Look (macOS), not for all at once.
+              // A small element: `fast` in, `instant` out.
               Text {
+                id: winTitle
                 readonly property bool wanted: winHover.hovered || (win.isSelected && root.showSelection) || win.peeking
                 width: Math.max(win.fw, panel.width * 0.16)
                 x: win.fx + (win.fw - width) / 2
@@ -3509,8 +3426,9 @@ Item {
                 opacity: win.labelOpacity * (wanted && !win.dropped ? 1 : 0)
                 Behavior on opacity {
                   NumberAnimation {
-                    duration: Motion.fast
-                    easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
+                    duration: winTitle.wanted ? Motion.d(Motion.fast) : Motion.instant
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: winTitle.wanted ? Motion.easeOut : Motion.easeIn
                   }
                 }
                 visible: opacity > 0
@@ -3518,6 +3436,65 @@ Item {
                 maximumLineCount: 1
                 style: Text.Raised
                 styleColor: Qt.rgba(0, 0, 0, 0.6)
+              }
+            }
+          }
+
+          // Selection is one ring in the accent colour (macOS: a blue frame
+          // under the pointer) that glides from window to window -- `fast`
+          // ease-in-out, or without a glide while an arrow key auto-repeats --
+          // plus the nudge on the window itself. No fill and no dim on the
+          // others: in the exposé the windows are the content, and dimming
+          // five of six makes the whole view look switched off. A plain
+          // Rectangle with nothing inside, so moving and resizing it lays out
+          // nothing else. Gone the instant a close starts: left at the
+          // overview rect while the window grows back, it was a ghost frame.
+          Rectangle {
+            id: ring
+            readonly property bool wanted: root.settled && root.showSelection && !root.desktopMode
+                && panel.selected >= 0 && panel.selected < panel.windows.length
+            // Glides only on a change of selection: while the selected window
+            // itself moves (a drag, Quick Look, the layout settling) the ring
+            // sticks to it.
+            property bool glide: false
+            Connections {
+              target: panel
+              function onSelectedChanged() { ring.glide = ring.wanted && panel.dragWindow < 0 }
+            }
+            x: panel.selX
+            y: panel.selY
+            width: panel.selW
+            height: panel.selH
+            Behavior on x {
+              enabled: ring.glide
+              NumberAnimation { duration: panel.keyRepeat ? Motion.instant : Motion.travel(Motion.fast); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut; onRunningChanged: if (!running) ring.glide = false }
+            }
+            Behavior on y {
+              enabled: ring.glide
+              NumberAnimation { duration: panel.keyRepeat ? Motion.instant : Motion.travel(Motion.fast); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut; onRunningChanged: if (!running) ring.glide = false }
+            }
+            Behavior on width {
+              enabled: ring.glide
+              NumberAnimation { duration: panel.keyRepeat ? Motion.instant : Motion.travel(Motion.fast); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
+            }
+            Behavior on height {
+              enabled: ring.glide
+              NumberAnimation { duration: panel.keyRepeat ? Motion.instant : Motion.travel(Motion.fast); easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeInOut }
+            }
+            // The same nudge as the window under it.
+            scale: Motion.sc(Motion.scaleHover)
+            transform: Translate { y: -Motion.px(Motion.hoverLift) }
+            radius: panel.ringRadius
+            color: "transparent"
+            border.width: Math.max(2, Math.round(3 * panel.uiScale))
+            border.color: Color.accent
+            opacity: ring.wanted ? 1 : 0
+            visible: opacity > 0.001
+            Behavior on opacity {
+              NumberAnimation {
+                duration: ring.wanted ? Motion.d(Motion.fast) : Motion.instant
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: ring.wanted ? Motion.easeOut : Motion.easeIn
               }
             }
           }
@@ -3533,7 +3510,7 @@ Item {
             text: root.appMode ? "No windows of this app" : "No windows"
             font.family: root.fontFamily
             font.pixelSize: Math.round(22 * panel.uiScale)
-            color: Util.alpha(panel.overlayInk, Motion.secondaryTextAlpha)
+            color: Util.alpha(panel.overlayInk, panel.secondaryInkAlpha)
           }
         }
       }

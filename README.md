@@ -11,17 +11,17 @@ GPU-transformed animation.
 A Spaces strip across the top, and underneath it the current desktop's windows
 shrunk out so none overlaps, each with its app icon; the title shows for the
 window under the pointer. Click a window to jump to it, click a desktop to
-switch to it. The strip opens folded, showing only the desktops' names, and
-unfolds into live thumbnails when the pointer touches it -- with a "+" at the
-right end for a new desktop and an "x" on each thumbnail to remove one. Drag a
-window onto a thumbnail (or onto the "+") to move it there.
+switch to it (the overview stays up, so you can pick a window there next). The
+strip shows live thumbnails from the first frame -- with a "+" at the right end
+for a new desktop and an "x" on each thumbnail to remove one. Drag a window
+onto a thumbnail (or onto the "+") to move it there.
 
 Three modes, as in macOS:
 
 | Mode | What it shows | Open with |
 | --- | --- | --- |
 | **Mission Control** | the Spaces strip and the current desktop's windows | F8, four fingers up |
-| **App Exposé** | one app's windows from every desktop, packed side by side; windows the dock has minimized in a smaller row underneath; `Tab` moves on to the next app | SHIFT+F8, four fingers down |
+| **App Exposé** | one app's windows from every desktop, packed side by side; windows the dock has minimized in a smaller row underneath; `Tab` moves on to the next app | F9 (or SHIFT+F8), four fingers down |
 | **Show Desktop** | every window slid out to the nearest screen edge, only a sliver left, so the wallpaper is clear | CTRL+F8 |
 
 Pressing the same key again closes; another mode's key switches in place, the
@@ -104,7 +104,7 @@ thing it asks you to change, and you make that change yourself.
 | `Esc`, click the backdrop | Close |
 | `CTRL`+`↓` / `CTRL`+`↑` | Close (mirrors whatever opened it) |
 
-Clicking a desktop thumbnail switches to it and closes. Clicking a window
+Clicking a desktop thumbnail switches to it and stays open. Clicking a window
 focuses it and closes. Dragging a window onto a thumbnail moves it to that
 desktop; onto the "+" it goes to a new one. The "x" on a thumbnail moves its
 windows to the desktop on its left and renumbers the ones after it, so
@@ -166,6 +166,15 @@ Hyprland's blurred-texture path leaves `glStencilMask` at `0x00`, so hyprbars'
 rounded-corner mask silently writes nothing and the bar is tested against the
 previous surface's discard mask. It has nothing to do with this plugin, and a
 blur rule here is harmless.
+
+## Motion
+
+Every animation follows [docs/ANIMATION-SPEC.md](docs/ANIMATION-SPEC.md). The
+tokens -- durations, curves, distances -- live in `Motion.qml`, and nothing
+else in the plugin carries a number for any of them. `MC_REDUCED_MOTION=1` in
+the shell's environment removes every move and scale and leaves short fades --
+on Omarchy set it for the session with `hl.env("MC_REDUCED_MOTION", "1")` in
+`~/.config/hypr/looknfeel.lua` and log out and back in.
 
 ## Why not hyprexpo
 
