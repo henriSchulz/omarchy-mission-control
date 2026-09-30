@@ -1,13 +1,31 @@
 pragma Singleton
 import QtQuick
 import Quickshell
+import Quickshell.Io
 
 // Motion tokens for Mission Control: the one place a duration, curve or
 // distance is written down (docs/ANIMATION-SPEC.md). Nothing else in the
 // plugin carries a number for any of these.
 QtObject {
-  // MC_REDUCED_MOTION=1: no translate or scale anywhere, only `instant` fades.
-  readonly property bool reduced: String(Quickshell.env("MC_REDUCED_MOTION") || "") === "1"
+  // Reduced motion: no translate or scale anywhere, only `instant` fades. On
+  // when MC_REDUCED_MOTION=1 is in the environment, or when the system-wide
+  // switch (System Settings > Accessibility > Reduce motion) is on: that one
+  // lives in henri-ui's Prefs.js (`var reduceMotion = true`), read here as a
+  // plain file -- nothing of henri-ui is imported. MC_REDUCED_MOTION=0 forces
+  // it off for testing.
+  readonly property string envReduced: String(Quickshell.env("MC_REDUCED_MOTION") || "")
+  // text() blocks on the first read (blockLoading), so the very first open
+  // already knows; it is reactive, so a change on disk flips it live.
+  readonly property bool systemReduced: /^\s*var\s+reduceMotion\s*=\s*true\b/m.test(prefs.text() || "")
+  readonly property bool reduced: envReduced === "1" || (envReduced !== "0" && systemReduced)
+
+  readonly property FileView prefs: FileView {
+    path: (Quickshell.env("XDG_DATA_HOME") || (Quickshell.env("HOME") + "/.local/share")) + "/henri-ui/Prefs.js"
+    blockLoading: true      // known before the first open
+    watchChanges: true
+    printErrors: false      // no henri-ui on this machine: just the env switch
+    onFileChanged: reload()
+  }
 
   // Durations (ms)
   readonly property int instant: 80   // hover, pressed, colour change

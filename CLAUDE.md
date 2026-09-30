@@ -6,7 +6,10 @@ und werden überall importiert; keine Dauer, Kurve oder Distanz steht sonst
 irgendwo als Zahl. Henris zentrale henri-ui-Bibliothek gilt hier bewusst
 **nicht** — nichts daraus importieren oder übernehmen.
 
-Reduced Motion: `MC_REDUCED_MOTION=1` in der Umgebung der Shell — auf Omarchy per
+Reduced Motion: folgt dem systemweiten Schalter (System Settings › Bedienungshilfen ›
+Bewegung reduzieren = `var reduceMotion = true` in `~/.local/share/henri-ui/Prefs.js`;
+`Motion.qml` liest die Datei per `FileView` als Text — das ist kein henri-ui-Import).
+Zusätzlich `MC_REDUCED_MOTION=1` (an) bzw. `=0` (aus, übersteuert) in der Umgebung der Shell — auf Omarchy per
 `hl.env("MC_REDUCED_MOTION", "1")` in `~/.config/hypr/looknfeel.lua` (Session neu
 starten; `omarchy-restart-shell` reicht Variablen nicht durch). Zum Testen ohne
 Session-Neustart: `MC_REDUCED_MOTION=1 tests/harness.sh start`.

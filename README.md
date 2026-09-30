@@ -171,10 +171,13 @@ blur rule here is harmless.
 
 Every animation follows [docs/ANIMATION-SPEC.md](docs/ANIMATION-SPEC.md). The
 tokens -- durations, curves, distances -- live in `Motion.qml`, and nothing
-else in the plugin carries a number for any of them. `MC_REDUCED_MOTION=1` in
-the shell's environment removes every move and scale and leaves short fades --
-on Omarchy set it for the session with `hl.env("MC_REDUCED_MOTION", "1")` in
-`~/.config/hypr/looknfeel.lua` and log out and back in.
+else in the plugin carries a number for any of them. Reduced motion removes
+every move and scale and leaves short fades. It follows the system-wide switch
+(System Settings > Accessibility > Reduce motion, stored as
+`var reduceMotion = true` in `~/.local/share/henri-ui/Prefs.js`, read as a plain
+file and watched) -- or set `MC_REDUCED_MOTION=1` in the shell's environment
+(`hl.env("MC_REDUCED_MOTION", "1")` in `~/.config/hypr/looknfeel.lua`, then log
+out and back in); `MC_REDUCED_MOTION=0` forces it off.
 
 ## Why not hyprexpo
 
