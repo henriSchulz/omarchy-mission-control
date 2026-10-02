@@ -179,6 +179,15 @@ file and watched) -- or set `MC_REDUCED_MOTION=1` in the shell's environment
 (`hl.env("MC_REDUCED_MOTION", "1")` in `~/.config/hypr/looknfeel.lua`, then log
 out and back in); `MC_REDUCED_MOTION=0` forces it off.
 
+One thing is not a fixed curve: a released swipe. A curve starts from
+standstill, so the windows stopped under the lifting fingers and set off again.
+On release (opening, closing, and the sideways swipe between desktops) the
+critically damped spring that followed the fingers keeps its speed and gets the
+end of the way as its target; its rate is `Motion.springRate(<token duration>)`,
+the spring that is home after the duration the timed version takes, and speed
+that would carry it past the target is trimmed. Keys and clicks use the curves
+as before.
+
 ## Why not hyprexpo
 
 hyprexpo does a similar job inside the compositor, but it is a render pass, not

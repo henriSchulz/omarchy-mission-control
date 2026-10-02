@@ -40,6 +40,12 @@ QtObject {
   readonly property var easeIn: [0.4, 0, 1, 1, 1, 1]           // disappears
   readonly property var easeInOut: [0.65, 0, 0.35, 1, 1, 1]    // travels A -> B
 
+  // Rate (1/s) of a critically damped spring -- the only spring the spec
+  // allows, it cannot swing past its target -- that is 99 % home `ms` after
+  // starting from rest: (1 + wt) e^-wt = 0.01 at wt = 6.64. For a released
+  // swipe, whose speed a fixed curve cannot take over.
+  function springRate(ms) { return 6640 / Math.max(1, ms) }
+
   // Distances (px) and scales
   readonly property int distanceSm: 4
   readonly property int distanceMd: 8

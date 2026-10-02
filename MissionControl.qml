@@ -52,7 +52,7 @@ Item {
   // One line in the shell log on mount, so "is the new code running?" has an
   // answer after a restart (the shell's hot reload does not re-create a
   // keepLoaded overlay, and a cached old version is otherwise invisible).
-  readonly property string build: "1.5.0 motion-spec"
+  readonly property string build: "1.5.1 release-spring"
   Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
 
   // What the user last asked for, as opposed to what is currently on screen.
@@ -375,6 +375,7 @@ Item {
     root.stripHold = false;
     progressTween.stop();
     progressSpring.stop();
+    root.springSettling = false;
     root.springVelocity = 0;
     root.progressAnimDuration = 0;
     root.progress = 0;
@@ -453,8 +454,14 @@ Item {
   property int progressAnimDuration: 0
 
   function animateProgress(to) {
+    // Fingers just lifted: carry on from the speed they had.
+    if (root.releasing && !Motion.reduced) {
+      root.settleProgress(to);
+      return;
+    }
     progressTween.stop();
     progressSpring.stop();
+    root.springSettling = false;
     root.springVelocity = 0;
     // Reduced motion: nothing shrinks or slides. The windows are already in
     // place and the surface crossfades -- see the fades in setShown.
@@ -510,9 +517,81 @@ Item {
   }
 
   function stepSpring(dt) {
-    const next = root.springStep(root.progress, root.springVelocity, root.springTarget, root.springOmega, dt);
+    const to = root.springTarget;
+    const before = to - root.progress;
+    const next = root.springStep(root.progress, root.springVelocity, to,
+                                 root.springSettling ? root.settleRate : root.springOmega, dt);
     root.springVelocity = next[1];
     root.progress = next[0];
+    if (!root.springSettling)
+      return;
+    // Closing: dissolve over the tail of the way home, like the timed close.
+    if (to <= 0 && !root.settleFading && root.progress <= root.fadeStartProgress) {
+      root.settleFading = true;
+      fadeOutSoon.interval = 1;
+      collapseThenHide.interval = root.fadeDuration + 16;
+      fadeOutSoon.restart();
+      collapseThenHide.restart();
+    }
+    if (root.arrived(before, to - next[0])) {
+      progressSpring.stop();
+      root.springSettling = false;
+      root.springVelocity = 0;
+      root.progress = to;
+    }
+  }
+
+  // --- release --------------------------------------------------------------
+  // A curve starts from standstill, so handing a released swipe to one made the
+  // windows stop under the lifting fingers and set off again (measured: 0.07 of
+  // the way per frame, then 0.003, then up again). On release the spring that
+  // followed the fingers keeps its speed and simply gets the end of the way as
+  // its target. Critically damped, so it cannot swing past (spec: the only
+  // spring allowed); its rate is the one that is home after the token duration
+  // the timed open or close takes.
+  property bool springSettling: false
+  property real settleRate: 0
+  property bool settleFading: false
+  // Close enough to count as there: a pixel or two of the longest way.
+  readonly property real settleEpsilon: 0.002
+  // Where the timed close starts its fade: the curve's value at fadeStartAt.
+  readonly property real fadeStartProgress: 1 - root.bezier(root.unshrinkCurve, root.fadeStartAt)
+  // Fingers do not lift in the same frame, and libinput holds updates back for
+  // up to 100 ms while their number changes (measured on this trackpad: 13 to
+  // 52 ms between the last update and the end). A gap this long is still the
+  // lift, not a hand that stopped first.
+  readonly property int liftGap: 120
+
+  // `left` is the signed way still to go; done when it is nothing, or flipped.
+  function arrived(before, left) {
+    return Math.abs(left) < root.settleEpsilon || before * left < 0;
+  }
+
+  // The most speed a critically damped spring takes over without crossing its
+  // target: rate x distance. Anything faster is trimmed to that.
+  function carried(v, rate, dist) {
+    const most = rate * Math.abs(dist);
+    return Math.max(-most, Math.min(most, v));
+  }
+
+  function settleProgress(to) {
+    progressTween.stop();
+    root.progressAnimDuration = 0;
+    root.settleFading = false;
+    const dist = to - root.progress;
+    if (Math.abs(dist) < root.settleEpsilon) {
+      progressSpring.stop();
+      root.springSettling = false;
+      root.springVelocity = 0;
+      root.progress = to;
+      return;
+    }
+    root.settleRate = Motion.springRate(dist > 0 ? root.shrinkDuration : root.unshrinkDuration);
+    root.springVelocity = root.carried(root.springVelocity, root.settleRate, dist);
+    root.springTarget = to;
+    root.springSettling = true;
+    if (!progressSpring.running)
+      progressSpring.start();
   }
 
   // --- sideways swipe between desktops ---------------------------------------
@@ -550,12 +629,23 @@ Item {
   FrameAnimation {
     id: slideSpring
     onTriggered: {
-      const next = root.springStep(root.slide, root.slideVelocity, root.slideTarget, root.springOmega,
+      const to = root.slideTarget;
+      const before = to - root.slide;
+      const next = root.springStep(root.slide, root.slideVelocity, to,
+                                   root.slideSettling ? Motion.springRate(Motion.base) : root.springOmega,
                                    Math.min(frameTime, 1 / 30));
       root.slideVelocity = next[1];
       root.slide = next[0];
+      if (root.slideSettling && root.arrived(before, to - next[0])) {
+        stop();
+        root.slideSettling = false;
+        root.slideVelocity = 0;
+        root.slide = to;
+      }
     }
   }
+  // A released swipe: the follower spring carries on to the page, see "release".
+  property bool slideSettling: false
   // Pages travel from A to B: ease-in-out, `base` for a whole page and less
   // for the rest of a released swipe.
   NumberAnimation {
@@ -586,6 +676,7 @@ Item {
     slideSpring.stop();
     slideAnim.stop();
     slideWatchdog.stop();
+    root.slideSettling = false;
     root.slideTracking = false;
     root.slidePendingDir = 0;
     root.slide = 0;
@@ -593,10 +684,20 @@ Item {
     root.slideVelocity = 0;
   }
 
-  // Glide to `target` from wherever the page is now.
-  function settleSlide(target) {
-    slideSpring.stop();
+  // Glide to `target` from wherever the page is now. `carry`: the fingers just
+  // let go, keep their speed (the spring) instead of starting a curve.
+  function settleSlide(target, carry) {
     slideAnim.stop();
+    if (carry && !Motion.reduced && Math.abs(target - root.slide) >= root.settleEpsilon) {
+      root.slideVelocity = root.carried(root.slideVelocity, Motion.springRate(Motion.base), target - root.slide);
+      root.slideTarget = target;
+      root.slideSettling = true;
+      if (!slideSpring.running)
+        slideSpring.start();
+      return;
+    }
+    slideSpring.stop();
+    root.slideSettling = false;
     root.slideVelocity = 0;
     root.slideTarget = target;
     const dist = Math.abs(target - root.slide);
@@ -614,7 +715,7 @@ Item {
   function rebaseSlide(step) {
     root.slide += step;
     root.slideStart += step;
-    if (root.slideTracking) {
+    if (root.slideTracking || root.slideSettling) {
       root.slideTarget += step;
       slideSpring.start();
     } else {
@@ -630,6 +731,7 @@ Item {
       root.slideTracking = true;
       slideWatchdog.restart();
       slideAnim.stop();
+      root.slideSettling = false;
       root.slideVelocity = 0;
       root.slideTarget = root.slide;
       root.slideStart = root.slideTarget;
@@ -659,7 +761,8 @@ Item {
     } else if (phase === "end" && root.slideTracking) {
       root.slideTracking = false;
       slideWatchdog.stop();
-      if (time - root.slideLastTime > 80 || value === 1)
+      // A cancelled swipe (the number of fingers changed) is a release too.
+      if (time - root.slideLastTime > root.liftGap)
         root.slideTrackVelocity = 0;
       // A flick decides by its direction, a slow drag by how far it got.
       const v = root.slideTrackVelocity;
@@ -670,7 +773,7 @@ Item {
         side = root.slideTarget < 0 ? -1 : 1;
       if ((side < 0 && !root.slideCanNext) || (side > 0 && !root.slideCanPrev))
         side = 0;
-      root.settleSlide(side);
+      root.settleSlide(side, true);
       if (side !== 0)
         root.slideRequested(-side);
     }
@@ -740,6 +843,7 @@ Item {
   function handleGesture(phase, value, time) {
     if (phase === "start") {
       progressTween.stop();
+      root.springSettling = false;
       root.springVelocity = 0;
       root.springTarget = root.progress;
       collapseThenHide.stop();
@@ -797,8 +901,9 @@ Item {
     } else if (phase === "end" && root.tracking) {
       root.tracking = false;
       trackWatchdog.stop();
-      // Fingers held still before lifting: no fling.
-      if (time - root.trackLastTime > 80 || value === 1)
+      // Fingers held still before lifting: no fling. A cancelled swipe (the
+      // number of fingers changed) is a release like any other.
+      if (time - root.trackLastTime > root.liftGap)
         root.trackVelocity = 0;
       let open = root.springTarget + root.trackVelocity * 120 > 0.4;
       if (Math.abs(root.trackVelocity) > 0.002)
@@ -926,6 +1031,14 @@ Item {
       expandFallback.stop();
       // Timed off the animation actually running, which is shorter when the
       // close starts part-way (a released swipe).
+      if (root.springSettling) {
+        // A released swipe: the spring starts the fade when the windows are
+        // nearly home (stepSpring). This is only the backstop.
+        fadeOutSoon.stop();
+        collapseThenHide.interval = root.shrinkDuration + root.unshrinkDuration;
+        collapseThenHide.restart();
+        return;
+      }
       const dur = progressTween.running ? root.progressAnimDuration : 0;
       // The curve is ~98.8% home at fadeStartAt: the copy is then
       // indistinguishable from the desktop, so a short fade over the tail hands
