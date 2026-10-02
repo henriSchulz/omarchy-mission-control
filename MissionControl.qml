@@ -52,7 +52,7 @@ Item {
   // One line in the shell log on mount, so "is the new code running?" has an
   // answer after a restart (the shell's hot reload does not re-create a
   // keepLoaded overlay, and a cached old version is otherwise invisible).
-  readonly property string build: "1.5.2 attached"
+  readonly property string build: "1.5.3 swipe-owner"
   Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
 
   // What the user last asked for, as opposed to what is currently on screen.
@@ -649,7 +649,7 @@ Item {
   // went even when the keyboard wraps around the ends.
   property int slidePendingDir: 0
   // Touchpad units per page, same as gestures:workspace_swipe_distance.
-  readonly property real slideDistance: 500
+  readonly property real slideDistance: 550
 
   signal slideRequested(int dir)
 
@@ -2008,7 +2008,25 @@ Item {
       // Only the focused monitor's overview slides; the others stay put.
       // (The test screen is never the focused monitor, so it counts as the
       // owner outright.)
-      readonly property bool slideOwner: root.testScreen !== "" || (panel.hyprMonitor !== null && panel.hyprMonitor.focused)
+      //
+      // HyprlandMonitor.focused alone is not enough: Quickshell only sets it on
+      // a `focusedmon` event, and Hyprland sends one when the focus MOVES to
+      // another monitor. After a shell restart on a single-screen setup no
+      // monitor is ever "focused" -- no panel owned the swipe, it found no
+      // neighbouring desktop, gave the rubber band and sprang back, and the
+      // arrow keys switched without sliding. So while no monitor carries the
+      // live flag, go by what Hyprland answered to the refresh on open.
+      readonly property bool anyFocused: {
+        const mons = Hyprland.monitors.values || [];
+        for (let i = 0; i < mons.length; i++)
+          if (mons[i].focused)
+            return true;
+        return false;
+      }
+      readonly property bool monitorFocused: panel.hyprMonitor !== null
+          && (panel.anyFocused ? panel.hyprMonitor.focused
+              : !!panel.hyprMonitor.lastIpcObject && panel.hyprMonitor.lastIpcObject.focused === true)
+      readonly property bool slideOwner: root.testScreen !== "" || panel.monitorFocused
       readonly property real slideX: panel.slideOwner ? root.slide * panel.width : 0
       Binding { target: root; property: "slideCanPrev"; value: panel.desktopAt(-1) !== null; when: panel.slideOwner }
       Binding { target: root; property: "slideCanNext"; value: panel.desktopAt(1) !== null; when: panel.slideOwner }
