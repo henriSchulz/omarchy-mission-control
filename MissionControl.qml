@@ -52,7 +52,7 @@ Item {
   // One line in the shell log on mount, so "is the new code running?" has an
   // answer after a restart (the shell's hot reload does not re-create a
   // keepLoaded overlay, and a cached old version is otherwise invisible).
-  readonly property string build: "1.5.1 release-spring"
+  readonly property string build: "1.5.2 attached"
   Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
 
   // What the user last asked for, as opposed to what is currently on screen.
@@ -482,17 +482,48 @@ Item {
     progressTween.start();
   }
 
-  // --- finger follower ------------------------------------------------------
-  // Setting `progress` straight from the touchpad made every fast or coarse
-  // update a visible jump. The fingers now only move `springTarget`; a
-  // critically damped spring pulls `progress` towards it every frame. Slow
-  // swipes feel attached, fast ones are smoothed into a glide. It runs only
-  // while the fingers are down: not an animation but the low-pass filter that
-  // keeps the windows attached to them, so its rate is not a motion token.
-  // Lag behind the fingers is about 2 / omega: ~70ms.
+  // --- under the fingers ----------------------------------------------------
+  // While the fingers are down, `progress` IS their position: every touchpad
+  // update sets it, nothing in between. (A spring used to pull it along behind
+  // them, about 70 ms late -- smooth, but not attached.) The spring below only
+  // runs after the release, see "release"; the speed it starts with is the
+  // fingers', measured over the last updates.
   property real springTarget: 0
   property real springVelocity: 0 // progress per second
-  readonly property real springOmega: 28
+  // Finger samples [time ms, travel] of the swipe in progress, and how far
+  // back the speed at release looks.
+  property var trackSamples: []
+  property var slideSamples: []
+  readonly property int velocityWindow: 100
+
+  function sample(list, time, travel) {
+    list.push([time, travel]);
+    while (list.length > 2 && time - list[0][0] > 2 * root.velocityWindow)
+      list.shift();
+  }
+
+  // Travel per second at the last sample: the slope of a line through the
+  // samples of the last `velocityWindow` ms. One update against the next is
+  // too jittery to hand to a spring.
+  function fingerSpeed(list) {
+    const n = list.length;
+    if (n < 2)
+      return 0;
+    const last = list[n - 1][0];
+    let from = n - 2;
+    while (from > 0 && last - list[from - 1][0] <= root.velocityWindow)
+      from--;
+    let mt = 0, mx = 0;
+    for (let i = from; i < n; i++) { mt += list[i][0]; mx += list[i][1]; }
+    mt /= n - from;
+    mx /= n - from;
+    let num = 0, den = 0;
+    for (let i = from; i < n; i++) {
+      num += (list[i][0] - mt) * (list[i][1] - mx);
+      den += (list[i][0] - mt) * (list[i][0] - mt);
+    }
+    return den > 0 ? num / den * 1000 : 0;
+  }
 
   FrameAnimation {
     id: progressSpring
@@ -519,12 +550,9 @@ Item {
   function stepSpring(dt) {
     const to = root.springTarget;
     const before = to - root.progress;
-    const next = root.springStep(root.progress, root.springVelocity, to,
-                                 root.springSettling ? root.settleRate : root.springOmega, dt);
+    const next = root.springStep(root.progress, root.springVelocity, to, root.settleRate, dt);
     root.springVelocity = next[1];
     root.progress = next[0];
-    if (!root.springSettling)
-      return;
     // Closing: dissolve over the tail of the way home, like the timed close.
     if (to <= 0 && !root.settleFading && root.progress <= root.fadeStartProgress) {
       root.settleFading = true;
@@ -544,9 +572,9 @@ Item {
   // --- release --------------------------------------------------------------
   // A curve starts from standstill, so handing a released swipe to one made the
   // windows stop under the lifting fingers and set off again (measured: 0.07 of
-  // the way per frame, then 0.003, then up again). On release the spring that
-  // followed the fingers keeps its speed and simply gets the end of the way as
-  // its target. Critically damped, so it cannot swing past (spec: the only
+  // the way per frame, then 0.003, then up again). On release a spring takes
+  // the windows on from the fingers' speed to the end of the way.
+  // Critically damped, so it cannot swing past (spec: the only
   // spring allowed); its rate is the one that is home after the token duration
   // the timed open or close takes.
   property bool springSettling: false
@@ -625,18 +653,17 @@ Item {
 
   signal slideRequested(int dir)
 
-  // The same finger filter for the sideways swipe; the release is an animation.
+  // The sideways swipe sits under the fingers too; this is its release spring.
   FrameAnimation {
     id: slideSpring
     onTriggered: {
       const to = root.slideTarget;
       const before = to - root.slide;
-      const next = root.springStep(root.slide, root.slideVelocity, to,
-                                   root.slideSettling ? Motion.springRate(Motion.base) : root.springOmega,
+      const next = root.springStep(root.slide, root.slideVelocity, to, Motion.springRate(Motion.base),
                                    Math.min(frameTime, 1 / 30));
       root.slideVelocity = next[1];
       root.slide = next[0];
-      if (root.slideSettling && root.arrived(before, to - next[0])) {
+      if (root.arrived(before, to - next[0])) {
         stop();
         root.slideSettling = false;
         root.slideVelocity = 0;
@@ -644,7 +671,7 @@ Item {
       }
     }
   }
-  // A released swipe: the follower spring carries on to the page, see "release".
+  // A released swipe on its way to the page, see "release".
   property bool slideSettling: false
   // Pages travel from A to B: ease-in-out, `base` for a whole page and less
   // for the rest of a released swipe.
@@ -659,7 +686,8 @@ Item {
   Timer {
     id: slideWatchdog
     interval: 350
-    onTriggered: if (root.slideTracking) root.handleSlide("end", 0, root.slideLastTime)
+    // No end arrived: the fingers are long gone, so no speed to carry.
+    onTriggered: if (root.slideTracking) root.handleSlide("end", 0, root.slideLastTime + root.liftGap + 1)
   }
 
   function setSwipeMode(on) {
@@ -717,7 +745,6 @@ Item {
     root.slideStart += step;
     if (root.slideTracking || root.slideSettling) {
       root.slideTarget += step;
-      slideSpring.start();
     } else {
       root.settleSlide(0);
     }
@@ -731,8 +758,10 @@ Item {
       root.slideTracking = true;
       slideWatchdog.restart();
       slideAnim.stop();
+      slideSpring.stop();
       root.slideSettling = false;
       root.slideVelocity = 0;
+      root.slideSamples = [[time, 0]];
       root.slideTarget = root.slide;
       root.slideStart = root.slideTarget;
       root.slideTravel = 0;
@@ -750,20 +779,24 @@ Item {
         root.slideTrackVelocity = root.slideTrackVelocity * 0.5 + (step / dt) * 0.5;
         root.slideLastTime = time;
       }
+      root.sample(root.slideSamples, time, root.slideTravel);
       const raw = root.slideStart + root.slideTravel;
       const lo = root.slideCanNext ? -1 : 0;
       const hi = root.slideCanPrev ? 1 : 0;
       root.slideTarget = raw < lo ? lo - root.rubberBand(lo - raw)
           : raw > hi ? hi + root.rubberBand(raw - hi)
           : raw;
-      if (!slideSpring.running)
-        slideSpring.start();
+      root.slide = root.slideTarget;
     } else if (phase === "end" && root.slideTracking) {
       root.slideTracking = false;
       slideWatchdog.stop();
       // A cancelled swipe (the number of fingers changed) is a release too.
-      if (time - root.slideLastTime > root.liftGap)
+      const still = time - root.slideLastTime > root.liftGap;
+      if (still)
         root.slideTrackVelocity = 0;
+      // In the rubber band the page barely moves for all the fingers do.
+      const banded = root.slide < (root.slideCanNext ? -1 : 0) || root.slide > (root.slideCanPrev ? 1 : 0);
+      root.slideVelocity = still || banded ? 0 : root.fingerSpeed(root.slideSamples);
       // A flick decides by its direction, a slow drag by how far it got.
       const v = root.slideTrackVelocity;
       let side = 0;
@@ -805,7 +838,8 @@ Item {
   Timer {
     id: trackWatchdog
     interval: 350
-    onTriggered: if (root.tracking) root.handleGesture("end", 0, root.trackLastTime)
+    // No end arrived: the fingers are long gone, so no speed to carry.
+    onTriggered: if (root.tracking) root.handleGesture("end", 0, root.trackLastTime + root.liftGap + 1)
   }
 
   Connections {
@@ -843,8 +877,10 @@ Item {
   function handleGesture(phase, value, time) {
     if (phase === "start") {
       progressTween.stop();
+      progressSpring.stop();
       root.springSettling = false;
       root.springVelocity = 0;
+      root.trackSamples = [[time, 0]];
       root.springTarget = root.progress;
       collapseThenHide.stop();
       fadeOutSoon.stop();
@@ -891,20 +927,24 @@ Item {
         root.trackVelocity = root.trackVelocity * 0.5 + instant * 0.5;
         root.trackLastTime = time;
       }
+      root.sample(root.trackSamples, time, root.trackTravel);
       const raw = root.trackStart + root.trackTravel;
       // Past fully open: resist, a little, like a rubber band.
       root.springTarget = raw <= 0 ? 0
           : raw <= 1 ? raw
           : 1 + root.rubberBand(raw - 1);
-      if (!progressSpring.running)
-        progressSpring.start();
+      root.progress = root.springTarget;
     } else if (phase === "end" && root.tracking) {
       root.tracking = false;
       trackWatchdog.stop();
       // Fingers held still before lifting: no fling. A cancelled swipe (the
       // number of fingers changed) is a release like any other.
-      if (time - root.trackLastTime > root.liftGap)
+      const still = time - root.trackLastTime > root.liftGap;
+      if (still)
         root.trackVelocity = 0;
+      // What the release spring starts with (settleProgress trims it).
+      // Not out of the rubber band, where the windows barely move.
+      root.springVelocity = still || root.progress > 1 ? 0 : root.fingerSpeed(root.trackSamples);
       let open = root.springTarget + root.trackVelocity * 120 > 0.4;
       if (Math.abs(root.trackVelocity) > 0.002)
         open = root.trackVelocity > 0;
