@@ -53,7 +53,10 @@ Item {
   // answer after a restart (the shell's hot reload does not re-create a
   // keepLoaded overlay, and a cached old version is otherwise invisible).
   readonly property string build: "1.5.3 swipe-owner"
-  Component.onCompleted: console.info("henri.missioncontrol " + root.build + " mounted")
+  Component.onCompleted: {
+    console.info("henri.missioncontrol " + root.build + " mounted");
+    root.probeStack();
+  }
 
   // What the user last asked for, as opposed to what is currently on screen.
   // The shell reads this to decide what `toggle` means, and it has to be the
@@ -253,6 +256,41 @@ Item {
   property color decoActive: "#ffd3ae78"
   property color decoInactive: "#aa595959"
 
+  // Stacking order, bare address -> index. `hyprctl clients` lists windows
+  // bottom to top; Hyprland.toplevels is not in that order.
+  property var stackRank: ({})
+  Process {
+    id: stackProbe
+    command: ["/usr/bin/hyprctl", "-j", "clients"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        let list;
+        try { list = JSON.parse(String(text || "")); } catch (e) { return; }
+        if (!Array.isArray(list))
+          return;
+        const rank = {};
+        for (let i = 0; i < list.length && i < 999; i++)
+          rank[String(list[i].address || "").replace(/^0x/, "")] = i + 1;
+        root.stackRank = rank;
+      }
+    }
+  }
+  function probeStack() {
+    if (!stackProbe.running)
+      stackProbe.running = true;
+  }
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (root.shown) return;
+      switch (event.name) {
+      case "activewindowv2": case "openwindow": case "closewindow":
+      case "movewindowv2": case "changefloatingmode": case "workspacev2":
+        root.probeStack();
+      }
+    }
+  }
+
   Process {
     id: decoProbe
     command: ["/usr/bin/hyprctl", "-j", "--batch",
@@ -371,6 +409,8 @@ Item {
     root.setSwipeMode(root.shown);
     if (root.shown)
       return;
+    // A click in the overview raised a window while events were ignored.
+    root.probeStack();
     root.resetSlide();
     root.stripHold = false;
     progressTween.stop();
@@ -1138,6 +1178,14 @@ Item {
       return;
     root.dispatch("hl.dsp.focus({ window = \"address:" + addr + "\" })",
                   "focuswindow address:" + addr);
+    // Focus alone never restacks a floating window: one behind another stays
+    // hidden. Raise it as well (a no-op for tiled windows).
+    root.dispatch("hl.dsp.window.alter_zorder({ mode = \"top\", window = \"address:" + addr + "\" })",
+                  "alterzorder top,address:" + addr);
+    // Its copy grows back in front too, or it lands behind and cross-fades.
+    const rank = Object.assign({}, root.stackRank);
+    rank[addr.slice(2)] = 1000;
+    root.stackRank = rank;
     hideSoon.start();
   }
 
@@ -3389,7 +3437,10 @@ Item {
                 easing.bezierCurve: Motion.easeOut
               }
 
-              z: win.held || win.landing || win.dropped || win.peeking ? 2 : 0
+              // Real stacking order (0..1) so overlapping floating windows keep
+              // their front-to-back order while they shrink and grow back.
+              z: win.held || win.landing || win.dropped || win.peeking ? 2
+                 : (root.stackRank[String(win.handle.address).replace(/^0x/, "")] || 0) / 1000
 
               // The selection ring lives outside the delegates (one ring that
               // glides between windows); while selected, this rect feeds it.
