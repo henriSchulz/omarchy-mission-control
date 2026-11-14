@@ -2749,8 +2749,8 @@ Item {
                   easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.easeOut
                 }
               }
-              style: Text.Raised
-              styleColor: Qt.rgba(0, 0, 0, 0.55)
+              style: Text.Outline
+              styleColor: Qt.rgba(0, 0, 0, 0.45)
             }
           }
 
@@ -3183,8 +3183,8 @@ Item {
               // has a size, and a NaN pixel size is a warning per frame.
               font.pixelSize: Math.max(8, Math.round(isFinite(panel.stripTileH) ? panel.stripTileH * 0.45 : 8))
               color: panel.overlayInk
-              style: Text.Raised
-              styleColor: Qt.rgba(0, 0, 0, 0.35)
+              style: Text.Outline
+              styleColor: Qt.rgba(0, 0, 0, 0.45)
             }
             HoverHandler { id: plusHover }
             TapHandler {
@@ -3605,8 +3605,9 @@ Item {
                 visible: opacity > 0
                 elide: Text.ElideRight
                 maximumLineCount: 1
-                style: Text.Raised
-                styleColor: Qt.rgba(0, 0, 0, 0.6)
+                // A thin dark outline keeps white text readable on a light wallpaper.
+                style: Text.Outline
+                styleColor: Qt.rgba(0, 0, 0, 0.45)
               }
             }
           }
