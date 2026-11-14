@@ -388,7 +388,10 @@ Item {
   // which read as a jolt, and one that ends at full speed slammed the copy into
   // its real rect right where it has to be indistinguishable from the desktop.
   readonly property int shrinkDuration: Motion.slow
-  readonly property int unshrinkDuration: Motion.base
+  // Closing feels immediate (spec: closing uses `fast`). A released swipe
+  // keeps its own, slower spring below, which carries the finger's speed.
+  readonly property int unshrinkDuration: Motion.fast
+  readonly property int swipeReturnDuration: Motion.base
   // Shortest animation, for finishing a nearly-done shrink.
   readonly property int shrinkMinDuration: Motion.fast
   // The closing crossfade over the tail of the movement.
@@ -614,7 +617,7 @@ Item {
       root.progress = to;
       return;
     }
-    root.settleRate = Motion.springRate(dist > 0 ? root.shrinkDuration : root.unshrinkDuration);
+    root.settleRate = Motion.springRate(dist > 0 ? root.shrinkDuration : root.swipeReturnDuration);
     root.springVelocity = root.carried(root.springVelocity, root.settleRate, dist);
     root.springTarget = to;
     root.springSettling = true;
@@ -1075,7 +1078,7 @@ Item {
         // A released swipe: the spring starts the fade when the windows are
         // nearly home (stepSpring). This is only the backstop.
         fadeOutSoon.stop();
-        collapseThenHide.interval = root.shrinkDuration + root.unshrinkDuration;
+        collapseThenHide.interval = root.shrinkDuration + root.swipeReturnDuration;
         collapseThenHide.restart();
         return;
       }
@@ -1170,7 +1173,7 @@ Item {
 
   Timer {
     id: hideSoon
-    interval: 80
+    interval: 0
     onTriggered: root.dismiss()
   }
 
