@@ -78,9 +78,10 @@ Two details that matter as much as the scale itself:
 - Anchor on the **windows' bounding box**, not on the desktop rect. That is what
   makes the gap under the Spaces strip a fixed ratio whatever the bar reserves.
 
-Spreading overlapping windows apart, which macOS also does, is not needed:
-Hyprland tiles, so windows on a workspace already do not overlap. Floating ones
-can, and are left overlapping on purpose — that is where they are.
+Tiled windows never overlap, so they keep their place. Floating ones can, on
+Omarchy's floating workspaces, and then a window behind another can be neither
+seen nor clicked. A desktop with any overlap is packed into rows like App Exposé
+(macOS spreads them too), never larger than the shrunken desktop.
 
 ## 7. Rounded corners on arbitrary content need a mask
 

@@ -2113,10 +2113,10 @@ Item {
       // cells blew small windows up to the size of big ones and put everything
       // in the wrong place.
       //
-      // Spreading overlapping windows apart, which macOS also does, is not
-      // needed here: Hyprland tiles, so the windows on a workspace already do
-      // not overlap. Floating ones can, and are left overlapping on purpose --
-      // that is where they are.
+      // Tiled windows never overlap, so they stay where they are. Floating
+      // ones can (Omarchy's floating workspaces), and a window behind another
+      // could not be seen or clicked; a desktop with any overlap is packed
+      // like App Exposé instead, never larger than the shrunken desktop.
       //
       // The margins are measured off a real Mission Control screenshot: a gap
       // under the Spaces strip of ~5.8% of the screen, ~10% left at the bottom
@@ -2205,6 +2205,17 @@ Item {
         const out = new Array(wins.length);
         for (const key in groups) {
           const idx = groups[key];
+          // Overlapping floating windows: packed (see above).
+          if (panel.overlaps(idx.map(i => wins[i]))) {
+            const placed = panel.packInto(wins, idx, panel.exposeAreaX, panel.exposeAreaY,
+                                          panel.exposeAreaW, panel.exposeAreaH,
+                                          Math.round(28 * panel.uiScale), panel.shrink);
+            for (let k = 0; k < placed.length; k++) {
+              placed[k].onScreen = true;
+              out[idx[k]] = placed[k];
+            }
+            continue;
+          }
           const o = panel.originFor(idx.map(i => wins[i]));
           for (let k = 0; k < idx.length; k++) {
             const i = idx[k];
@@ -2216,6 +2227,16 @@ Item {
           }
         }
         return out;
+      }
+
+      function overlaps(ws) {
+        const r = ws.map(t => t.lastIpcObject).filter(o => o && o.at && o.size);
+        for (let i = 0; i < r.length; i++)
+          for (let j = i + 1; j < r.length; j++)
+            if (r[i].at[0] < r[j].at[0] + r[j].size[0] && r[j].at[0] < r[i].at[0] + r[i].size[0]
+                && r[i].at[1] < r[j].at[1] + r[j].size[1] && r[j].at[1] < r[i].at[1] + r[i].size[1])
+              return true;
+        return false;
       }
 
       function sizeOf(t) {
