@@ -371,6 +371,8 @@ Item {
     root.setSwipeMode(root.shown);
     if (root.shown)
       return;
+    if (root.pendingFocus !== "")
+      focusAfterHide.start();
     root.resetSlide();
     root.stripHold = false;
     progressTween.stop();
@@ -1010,6 +1012,8 @@ Item {
     }
     root.opened = next;
     if (next) {
+      // Opened again before the last pick was focused: that pick is stale.
+      root.pendingFocus = "";
       // Pressed again mid-close: the surface is still up, so just re-expand
       // rather than falling through the "already shown" guard and doing
       // nothing while it finishes collapsing.
@@ -1138,7 +1142,30 @@ Item {
       return;
     root.dispatch("hl.dsp.focus({ window = \"address:" + addr + "\" })",
                   "focuswindow address:" + addr);
+    root.pendingFocus = addr;
     hideSoon.start();
+  }
+
+  // Hyprland refuses to focus a window while a layer holds the keyboard
+  // exclusively, as the overview does, so the focus above only lands when the
+  // window is on another desktop. Once the overview unmaps, Hyprland gives focus
+  // back to the window that had it before. So the picked window came to the
+  // front but kept no focus: scrolling and typing went to the old one until a
+  // click. Ask again once the surface is gone.
+  property string pendingFocus: ""
+
+  Timer {
+    id: focusAfterHide
+    // 0 still lets the unmap reach Hyprland first: Wayland flushes before the
+    // event loop runs this.
+    interval: 0
+    onTriggered: {
+      const addr = root.pendingFocus;
+      root.pendingFocus = "";
+      if (addr !== "" && !root.shown)
+        root.dispatch("hl.dsp.focus({ window = \"address:" + addr + "\" })",
+                      "focuswindow address:" + addr);
+    }
   }
 
   // Backstop only. The real trigger is the surface becoming visible; a fixed
