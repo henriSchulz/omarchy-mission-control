@@ -88,6 +88,96 @@ Item {
   // [{ id, monitor }]
   property var extraDesktops: []
 
+  // --- how desktops are numbered ------------------------------------------
+  // Three models, first match wins, so the strip uses the numbers the keys do:
+  //   1. Workspace rules bind ids to monitors (hyprmoncfg writes them, or the
+  //      user does): shown as the real ids, because Super + 4 goes to 4.
+  //   2. Omarchy's blocks of ten (1-10 on the first monitor, 11-20 on the
+  //      second, ...): shown 1-10 on every monitor, like Omarchy's bar.
+  //   3. Plain ids.
+  // hyprmoncfg turns Omarchy's numbering off but leaves its block file behind,
+  // so rules win over the file.
+
+  // [{ id, monitor }], monitor as the rule names it: "DP-1" or "desc:...".
+  property var workspaceRules: []
+
+  Process {
+    id: rulesProbe
+    command: ["/usr/bin/hyprctl", "-j", "workspacerules"]
+    running: true   // once at mount; again on every open
+    stdout: StdioCollector {
+      onStreamFinished: root.workspaceRules = root.parseWorkspaceRules(text)
+    }
+  }
+
+  function parseWorkspaceRules(text) {
+    let list;
+    try { list = JSON.parse(String(text || "")); } catch (e) { return []; }
+    if (!Array.isArray(list))
+      return [];
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i] || {};
+      const ws = String(r.workspaceString || "");
+      if (!/^[0-9]{1,4}$/.test(ws) || typeof r.monitor !== "string" || r.monitor === "")
+        continue;
+      out.push({ id: parseInt(ws, 10), monitor: r.monitor });
+    }
+    return out;
+  }
+
+  // Ascending ids the rules give this Hyprland monitor; empty when none do.
+  function ruleIdsFor(mon) {
+    if (!mon)
+      return [];
+    const name = String(mon.name || "");
+    const desc = String(mon.description || (mon.lastIpcObject && mon.lastIpcObject.description) || "");
+    const ids = [];
+    for (let i = 0; i < root.workspaceRules.length; i++) {
+      const r = root.workspaceRules[i];
+      const byDesc = r.monitor.startsWith("desc:") && desc !== "" && desc.startsWith(r.monitor.slice(5).trim());
+      if ((r.monitor === name || byDesc) && ids.indexOf(r.id) < 0)
+        ids.push(r.id);
+    }
+    return ids.sort((a, b) => a - b);
+  }
+
+  // Connector -> Omarchy block, from the file Omarchy keeps them in. Omarchy
+  // 4.5 and the newer path; the newer one wins when both are there.
+  property var oldBlocks: ({})
+  property var newBlocks: ({})
+  readonly property var omarchyBlocks: Object.assign({}, root.oldBlocks, root.newBlocks)
+  readonly property string omarchyStateDir:
+      (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy"
+  FileView {
+    path: root.omarchyStateDir + "/monitor-workspaces"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.oldBlocks = root.parseBlocks(text())
+    onLoadFailed: root.oldBlocks = ({})
+  }
+  FileView {
+    path: root.omarchyStateDir + "/monitors/workspaces"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.newBlocks = root.parseBlocks(text())
+    onLoadFailed: root.newBlocks = ({})
+  }
+
+  function parseBlocks(text) {
+    const out = {};
+    const lines = String(text || "").split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const f = lines[i].split("\t");
+      const block = parseInt(f[0], 10);
+      if (f.length >= 3 && f[1] !== "" && block >= 0 && block < 100)
+        out[f[1]] = block;
+    }
+    return out;
+  }
+
   // Testing hook: with MISSION_CONTROL_TEST_SCREEN=<output> a standalone
   // instance builds its overlay on that output only and never takes the
   // keyboard, so it can be exercised on a headless output while the real shell
@@ -906,6 +996,7 @@ Item {
         Hyprland.refreshWorkspaces();
         Hyprland.refreshToplevels();
         if (!decoProbe.running) decoProbe.running = true;
+        if (!rulesProbe.running) rulesProbe.running = true;
         root.showSelection = false;
         root.shown = true;
       }
@@ -1046,6 +1137,7 @@ Item {
       Hyprland.refreshWorkspaces();
       Hyprland.refreshToplevels();
       if (!decoProbe.running) decoProbe.running = true;
+      if (!rulesProbe.running) rulesProbe.running = true;
       root.showSelection = false;
       root.contentVisible = true;
       // Reduced motion: the surface fades in over the desktop instead of the
@@ -1481,18 +1573,60 @@ Item {
       function addDesktop() {
         if (panel.slotIds.length >= panel.maxDesktops || !Hyprland.usingLua)
           return -1;
+        const taken = {};
         let max = 0;
         const all = Hyprland.workspaces.values || [];
-        for (let i = 0; i < all.length; i++)
-          if (all[i].id > max)
-            max = all[i].id;
+        for (let i = 0; i < all.length; i++) {
+          taken[all[i].id] = true;
+          max = Math.max(max, all[i].id);
+        }
         const extra = root.extraDesktops;
-        for (let i = 0; i < extra.length; i++)
-          if (extra[i].id > max)
-            max = extra[i].id;
-        const id = max + 1;
+        for (let i = 0; i < extra.length; i++) {
+          taken[extra[i].id] = true;
+          max = Math.max(max, extra[i].id);
+        }
+        const id = panel.nextDesktopId(taken, max);
+        if (id < 0)
+          return -1;
         root.extraDesktops = extra.concat([{ id: id, monitor: String(panel.screen.name) }]);
         return id;
+      }
+
+      // See "how desktops are numbered" at the top. ruleIds is this monitor's
+      // list under model 1; block is its Omarchy block under model 2, else -1.
+      readonly property var ruleIds: root.ruleIdsFor(panel.hyprMonitor)
+      readonly property int block: {
+        if (root.workspaceRules.length > 0)
+          return -1;
+        const b = root.omarchyBlocks[String(panel.screen.name)];
+        return b === undefined ? -1 : b;
+      }
+
+      // A new desktop stays in this monitor's own range, so the keys reach it:
+      // a free id its rules name, else a free slot of its Omarchy block (full
+      // block: none), else one past the highest id anywhere.
+      function nextDesktopId(taken, max) {
+        for (let i = 0; i < panel.ruleIds.length; i++)
+          if (!taken[panel.ruleIds[i]])
+            return panel.ruleIds[i];
+        if (panel.block >= 0) {
+          for (let id = panel.block * 10 + 1; id <= panel.block * 10 + 10; id++)
+            if (!taken[id])
+              return id;
+          return -1;
+        }
+        return max + 1;
+      }
+
+      // The number a desktop shows: its own name if the user gave it one, its
+      // slot 1-10 inside this monitor's Omarchy block, else its id.
+      function deskLabel(desk, id) {
+        const name = desk ? String(desk.name || "") : "";
+        if (name !== "" && name !== String(id))
+          return name;
+        if (panel.block >= 0 && id > panel.block * 10 && id <= panel.block * 10 + 10)
+          return String(id - panel.block * 10);
+        return String(id);
       }
 
       // The "x" on a thumbnail. Its windows go to the desktop on its left (or
@@ -2735,7 +2869,7 @@ Item {
               // Same treatment as the window title: a workspace name is
               // configuration-supplied text, not markup.
               textFormat: Text.PlainText
-              text: root.displayLabel(slotLabel.desk ? (slotLabel.desk.name || slotLabel.desk.id) : slotLabel.wsId)
+              text: root.displayLabel(panel.deskLabel(slotLabel.desk, slotLabel.wsId))
               // An explicit sans face: the system's default `sans` resolves
               // to Comic Code here, a monospace whose digits look like kana
               // once they are scaled up.

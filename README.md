@@ -137,7 +137,14 @@ path; the wallpaper is always loaded through the link itself.
   hl.workspace({ id = 1, persistent = true })  -- ... and so on for 2..N
   ```
 
-  It works without this; the strip is just less stable.
+  It works without this; the strip is just less stable. With more than one
+  monitor, pin each monitor's own desktops instead: Omarchy numbers them in
+  blocks of ten (11-20 on the second monitor), and a tool like hyprmoncfg
+  writes rules that pin them for you.
+
+The strip numbers desktops the way the keys do: by the workspace rules when
+there are any (hyprmoncfg), else 1-10 per monitor like Omarchy's bar, else by
+id. "+" adds a desktop inside that monitor's own range.
 
 ## Testing without touching the screen
 
